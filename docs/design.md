@@ -276,27 +276,41 @@ container crates. Playback would still go to the system player.
 |---|---|
 | `cat sky` | has both tags |
 | `-dog` | doesn't have the tag |
-| `~cat ~dog` | has at least one of them |
+| `~cat ~dog` | has at least one of them (works with metatags too: `~kind:video ~animated:yes`) |
 | `cat*` | wildcard on the tag name |
 | `artist:foo` | namespaced tag |
-| `rating:s` / `rating:q,e` | rating (also `-rating:e`) |
-| `width:>1920` `height:<=1080` `ratio:16:9` `mpixels:>2` | size |
-| `filesize:>2MB` `type:png` `kind:video` `animated:yes` | file |
-| `date:2024` `date:2024-01..2024-06` `date:>2023-05-01` | taken date (EXIF, else mtime) |
-| `imported:<7d` | added recently |
+| `rating:s` / `rating:q,e` | rating (also `-rating:e`; unrated files: `-rating:s,q,e`) |
+| `width:>1920` `height:<=1080` `width:1000..2000` `width:..500` | size in pixels |
+| `ratio:16:9` `ratio:>1` `mpixels:>2` | aspect ratio (a plain value matches ±0.01), megapixels (±5%) |
+| `filesize:>2MB` `filesize:500kb` | size in bytes; units k/m/g are powers of 1024; a plain value matches ±5% |
+| `type:png,gif` `kind:video` `animated:yes` | format (`jpg` = `jpeg`, `tif` = `tiff`), kind (image, video, other) |
+| `date:2024` `date:2024-01..2024-06` `date:>2023-05-01` | taken date (EXIF, else mtime, else import date) |
+| `imported:<7d` `imported:>1y` `date:30d..90d` | ages (`h`, `d`, `w`, `mo`, `y`) compare by age: `<7d` is "less than 7 days old" |
 | `tagcount:0` `tagcount:>10` | `tagcount:0` finds untagged files |
-| `path:"holiday 2023"` | substring of any path |
-| `dupes:yes` `missing:yes` | has a near-duplicate / file is missing |
-| `order:date` `order:-date` `order:size` `order:tagcount` `order:random` | sort order (default: newest imported) |
+| `path:"holiday 2023"` `path:pets/*` | substring of any path, or a wildcard over the whole path (case-insensitive) |
+| `source:none` `source:*pixiv*` | no source / source matches |
+| `md5:…` `hash:3fa9` | exact MD5 (32 hex digits) / SHA-256 prefix (4+ digits) |
+| `missing:yes` | the file wasn't found in the last scan |
+| `dupes:yes` | has a near-duplicate (M3) |
+| `order:date` `order:-date` `order:filesize` `order:name` `order:random` | sort order, one per search |
 
-The parser lives in `core` and returns an AST with error positions, so the search bar can
-underline mistakes. The store evaluates it with bitmap operations: AND for plain tags, OR for `~`
-groups, subtracting for `-`, and wildcards as the union of matching tag bitmaps. Metatags filter
-the columns. The result is then sorted. Results come back as a list of file numbers, so the grid
-can page through them freely.
+Values with spaces go in double quotes. Calendar dates are in UTC, the same way EXIF times are
+stored. Files without a value (videos have no width) never match a numeric filter and sort last.
 
-Autocomplete suggests tags by prefix, ordered by count, shows the namespace colour, and also
-completes metatag names.
+`order:` keys: `imported` (the default), `date`, `filesize`, `width`, `height`, `mpixels`,
+`ratio`, `tagcount`, `name`, `path`, `random`. Without a sign they sort largest or newest first,
+except `name` and `path`, which sort A→Z; `-` reverses (`_asc` / `_desc` also work). Results from
+several collections are sorted together. `order:random` keeps its shuffle for the session.
+
+The parser lives in `core` and returns an AST with error positions; the search bar underlines
+the bad term and says what's wrong, with an example. The store evaluates it with bitmap
+operations: AND for plain tags, OR for `~` groups, subtracting for `-`, and wildcards as the union
+of matching tag bitmaps. Metatags scan per-file columns kept in the index. The result is then
+sorted.
+
+Autocomplete suggests tags by prefix (also of the name after a namespace), ordered by count, in
+their namespace colour; then metatag names with an example, and values after `rating:`,
+`kind:`, `order:` and the like. Arrow keys choose, Tab or Enter accepts, Escape hides it.
 
 ## Duplicate detection (D9)
 

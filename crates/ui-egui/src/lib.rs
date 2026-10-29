@@ -8,6 +8,7 @@
 pub mod fonts;
 pub mod library;
 pub mod selection;
+pub mod suggest;
 pub mod thumbnails;
 pub mod viewer;
 
@@ -29,6 +30,8 @@ const SEARCH_ID: &str = "search";
 const TAG_INPUT_ID: &str = "tag-input";
 const GAP: f32 = 6.0;
 const ACCENT: Color32 = Color32::from_rgb(90, 150, 240);
+/// Most tags listed in the sidebar.
+const MAX_SIDEBAR_TAGS: usize = 300;
 
 /// Start-up options (from the command line).
 #[derive(Debug, Clone, Default)]
@@ -43,6 +46,8 @@ pub struct Options {
     /// Save a screenshot this long after the scans are done, then quit.
     pub screenshot: Option<PathBuf>,
     pub screenshot_after: Duration,
+    /// Put the keyboard focus here at start-up: `search` or `tags`.
+    pub focus: Option<String>,
 }
 
 pub struct App {
@@ -254,15 +259,27 @@ impl App {
             let right_width = 330.0;
             let width = (ui.available_width() - right_width).max(160.0);
             let bad = self.lib.query_error.is_some();
+            let err_span = self.lib.query_error.as_ref().map(|(_, s)| s.clone());
+            let text_color = ui.visuals().text_color();
+            let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+                let job = highlight_query(buf.as_str(), err_span.as_ref(), text_color);
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
             let edit = egui::TextEdit::singleline(&mut self.query)
-                .id(egui::Id::unique(SEARCH_ID))
-                .hint_text("Search: cat -dog ~sky ~sea cat* rating:s   (press / to focus)")
+                .hint_text("Search: cat -dog ~sky ~sea cat* rating:s width:>1920 order:date   (press / to focus)")
                 .desired_width(width)
-                .font(FontId::proportional(15.0));
+                .font(FontId::proportional(15.0))
+                .layouter(&mut layouter);
             let frame_color = if bad { Color32::from_rgb(220, 90, 80) } else { Color32::TRANSPARENT };
-            let resp = egui::Frame::NONE.stroke(Stroke::new(1.0, frame_color)).corner_radius(CornerRadius::same(4)).show(ui, |ui| ui.add(edit)).inner;
+            let (tags, usage) = (&self.lib.tags, self.lib.usage());
+            egui::Frame::NONE.stroke(Stroke::new(1.0, frame_color)).corner_radius(CornerRadius::same(4)).show(ui, |ui| {
+                egui::CompletionPopup::new(egui::Id::unique(SEARCH_ID))
+                    .align(egui::RectAlign::BOTTOM_START)
+                    .max_height(340.0)
+                    .show(ui, edit, |q| suggest::for_search(q.word, usage, tags).into_iter().map(|s| popup_item(tags, s)).collect())
+            });
             if self.focus == Some(SEARCH_ID) {
-                resp.request_focus();
+                focus_at_end(ui.ctx(), egui::Id::unique(SEARCH_ID), &self.query);
                 self.focus = None;
             }
             ui.label(RichText::new(count).color(Color32::from_gray(170)));
@@ -389,8 +406,10 @@ impl App {
             });
             return;
         }
-        let cell = self.tile + GAP;
-        let cols = ((ui.available_width() + GAP) / cell).floor().max(1.0) as usize;
+        let cols = ((ui.available_width() + GAP) / (self.tile + GAP)).floor().max(1.0) as usize;
+        // Stretch the tiles a little so the row fills the width.
+        let tile = ((ui.available_width() + GAP) / cols as f32 - GAP).max(self.tile);
+        let cell = tile + GAP;
         self.columns = cols;
         let rows = n.div_ceil(cols);
         let mut area = egui::ScrollArea::vertical().id_salt("grid").auto_shrink([false, false]);
@@ -412,7 +431,7 @@ impl App {
                     for col in 0..cols {
                         let i = row * cols + col;
                         let Some(hit) = self.lib.hits.get(i) else { break };
-                        let resp = draw_tile(ui, &self.lib, &mut self.thumbs, hit, self.tile, self.sel.items.contains(&i), self.sel.cursor == Some(i));
+                        let resp = draw_tile(ui, &self.lib, &mut self.thumbs, hit, tile, self.sel.items.contains(&i), self.sel.cursor == Some(i));
                         if resp.double_clicked() {
                             activated = Some(i);
                         } else if resp.clicked() {
@@ -548,48 +567,82 @@ impl App {
     }
 
     fn namespace_color(&self, ns: &str) -> Option<Color32> {
-        let (_, info) = self.lib.tags.namespaces().find(|(n, _)| *n == ns)?;
-        parse_color(&info.color)
+        namespace_color(&self.lib.tags, ns)
+    }
+
+    /// Left panel, below the collections: the tags of the current results.
+    fn results_sidebar(&mut self, ui: &mut egui::Ui) {
+        let total = self.lib.hits.len();
+        if total == 0 {
+            return;
+        }
+        let mut toggle: Option<String> = None;
+        ui.label(RichText::new("Ratings").strong());
+        let [s, q, e, none] = self.lib.result_ratings;
+        for (label, term, n) in [("Safe", "rating:s", s), ("Questionable", "rating:q", q), ("Explicit", "rating:e", e), ("Unrated", "-rating:s,q,e", none)] {
+            if n > 0 && sidebar_link(ui, label, n, query_has(&self.query, term), Color32::from_gray(210)) {
+                toggle = Some(term.to_string());
+            }
+        }
+        ui.add_space(6.0);
+        let shown = self.lib.result_tags.len().min(MAX_SIDEBAR_TAGS);
+        ui.label(RichText::new(format!("Tags in these results ({})", self.lib.result_tags.len())).strong())
+            .on_hover_text("Click: add to the search (click again to remove)\nCtrl+click: exclude");
+        // Namespaced groups first (by namespace), then plain tags; each by count.
+        let mut groups: BTreeMap<Option<&str>, Vec<(&str, u64)>> = BTreeMap::new();
+        for (tag, n) in self.lib.result_tags.iter().take(shown) {
+            groups.entry(self.lib.tags.namespace_of(tag)).or_default().push((tag.as_str(), *n));
+        }
+        let ordered = groups.iter().filter(|(ns, _)| ns.is_some()).chain(groups.iter().filter(|(ns, _)| ns.is_none()));
+        egui::ScrollArea::vertical().id_salt("result-tags").auto_shrink([false, false]).show(ui, |ui| {
+            for (ns, list) in ordered {
+                let color = ns.and_then(|ns| namespace_color(&self.lib.tags, ns)).unwrap_or(Color32::from_gray(215));
+                if let Some(ns) = ns {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(*ns).small().color(color));
+                }
+                for (tag, n) in list {
+                    let known = self.lib.tags.contains(tag);
+                    let shown_name = match ns {
+                        Some(ns) => tag.strip_prefix(*ns).and_then(|t| t.strip_prefix(':')).unwrap_or(tag),
+                        None => tag,
+                    };
+                    let c = if known { color } else { Color32::from_gray(120) };
+                    let active = query_has(&self.query, tag) || query_has(&self.query, &format!("-{tag}"));
+                    if sidebar_link(ui, shown_name, *n, active, c) {
+                        let exclude = ui.input(|i| i.modifiers.command);
+                        toggle = Some(if exclude && !active { format!("-{tag}") } else { (*tag).to_string() });
+                    }
+                }
+            }
+            if self.lib.result_tags.len() > shown {
+                ui.label(RichText::new(format!("…and {} more", self.lib.result_tags.len() - shown)).small().color(Color32::from_gray(130)));
+            }
+        });
+        if let Some(term) = toggle {
+            self.query = toggle_term(&self.query, &term);
+        }
     }
 
     fn tag_input(&mut self, ui: &mut egui::Ui, targets: &[Hit]) {
-        let edit = egui::TextEdit::singleline(&mut self.tag_input)
-            .id(egui::Id::unique(TAG_INPUT_ID))
-            .hint_text("Add tags (space-separated, -tag removes)")
-            .desired_width(f32::INFINITY);
-        let resp = ui.add(edit);
+        let edit = egui::TextEdit::singleline(&mut self.tag_input).hint_text("Add tags (space-separated, -tag removes)").desired_width(f32::INFINITY);
+        let (tags, usage) = (&self.lib.tags, self.lib.usage());
+        let out = egui::CompletionPopup::new(egui::Id::unique(TAG_INPUT_ID))
+            .align(egui::RectAlign::BOTTOM_START)
+            .max_height(300.0)
+            .show(ui, edit, |q| suggest::for_tag_input(q.word, usage, tags).into_iter().map(|s| popup_item(tags, s)).collect());
+        let resp = out.text_edit.response.response;
         if self.focus == Some(TAG_INPUT_ID) {
-            resp.request_focus();
+            focus_at_end(ui.ctx(), egui::Id::unique(TAG_INPUT_ID), &self.tag_input);
             self.focus = None;
         }
         if resp.changed() {
             self.unknown_typed.clear();
         }
-        let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        let submitted = out.accepted.is_none() && resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
         if submitted {
             self.apply_tag_input(targets);
             resp.request_focus();
-        }
-        // Suggestions for the word being typed.
-        let last = self.tag_input.split_whitespace().last().filter(|_| !self.tag_input.ends_with(' ')).unwrap_or("").trim_start_matches('-').to_string();
-        if !last.is_empty() {
-            let suggestions: Vec<String> = self.lib.tags.suggest(&last, 8).into_iter().map(str::to_string).collect();
-            let mut picked = None;
-            ui.horizontal_wrapped(|ui| {
-                for s in &suggestions {
-                    if ui.small_button(s).clicked() {
-                        picked = Some(s.clone());
-                    }
-                }
-            });
-            if let Some(s) = picked {
-                let mut words: Vec<String> = self.tag_input.split_whitespace().map(str::to_string).collect();
-                let negate = words.last().is_some_and(|w| w.starts_with('-'));
-                words.pop();
-                words.push(if negate { format!("-{s}") } else { s });
-                self.tag_input = words.join(" ") + " ";
-                self.focus = Some(TAG_INPUT_ID);
-            }
         }
         if !self.unknown_typed.is_empty() {
             ui.label(RichText::new(format!("Not in the tag list: {}", self.unknown_typed.join(" "))).color(Color32::from_rgb(240, 190, 110)));
@@ -702,6 +755,11 @@ impl App {
             if let Some(v) = self.options.view {
                 self.open_result(v, ctx);
             }
+            self.focus = match self.options.focus.as_deref() {
+                Some("search") => Some(SEARCH_ID),
+                Some("tags") => Some(TAG_INPUT_ID),
+                _ => None,
+            };
             self.ready_at = Some(Instant::now());
         }
         let Some(path) = self.options.screenshot.clone() else { return };
@@ -740,6 +798,7 @@ impl eframe::App for App {
             self.run_search();
         }
         self.sel.clamp(self.lib.hits.len());
+        self.lib.refresh_usage();
         self.thumbs.begin_frame(&ctx);
         self.handle_keys(&ctx);
 
@@ -750,7 +809,11 @@ impl eframe::App for App {
         });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         if self.viewer.is_none() {
-            egui::Panel::left("collections").resizable(true).default_size(210.0).show(ui, |ui| self.collections_panel(ui));
+            egui::Panel::left("collections").resizable(true).default_size(220.0).show(ui, |ui| {
+                self.collections_panel(ui);
+                ui.separator();
+                self.results_sidebar(ui);
+            });
         }
         egui::Panel::right("tags").resizable(true).default_size(300.0).min_size(220.0).max_size(480.0).show(ui, |ui| self.tag_panel(ui));
         egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -917,6 +980,125 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Focuses a text box with the cursor after its text (where typing continues).
+fn focus_at_end(ctx: &egui::Context, id: egui::Id, text: &str) {
+    let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+    let end = egui::text::CCursor::new(text.chars().count());
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+    state.store(ctx, id);
+    ctx.memory_mut(|m| m.request_focus(id));
+}
+
+fn namespace_color(tags: &boorucraft_store::TagList, ns: &str) -> Option<Color32> {
+    let (_, info) = tags.namespaces().find(|(n, _)| *n == ns)?;
+    parse_color(&info.color)
+}
+
+/// One autocomplete row: the name in its namespace colour, the count or example on the right.
+fn popup_item(tags: &boorucraft_store::TagList, s: suggest::Suggestion) -> egui::Suggestion {
+    let color = match &s.tag {
+        Some(t) => tags.namespace_of(t).and_then(|ns| namespace_color(tags, ns)).unwrap_or(Color32::from_gray(225)),
+        None => META_COLOR,
+    };
+    egui::Suggestion::new(s.insert).content(RichText::new(s.label).color(color)).description(s.detail)
+}
+
+/// A clickable "name count" line in the sidebar; returns true when clicked.
+fn sidebar_link(ui: &mut egui::Ui, name: &str, count: u64, active: bool, color: Color32) -> bool {
+    let text = RichText::new(name).color(color);
+    let text = if active { text.strong().underline() } else { text };
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        clicked = ui.add(egui::Label::new(text).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+        ui.label(RichText::new(count.to_string()).small().color(Color32::from_gray(120)));
+    });
+    clicked
+}
+
+/// Is `term` one of the query's terms (case-insensitive)?
+fn query_has(query: &str, term: &str) -> bool {
+    query.split_whitespace().any(|t| t.eq_ignore_ascii_case(term))
+}
+
+/// Removes `term` (or its `-` form) from the query if it's there, otherwise appends it.
+fn toggle_term(query: &str, term: &str) -> String {
+    let bare = term.trim_start_matches(['-', '~']);
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let present = |w: &&str| w.trim_start_matches(['-', '~']).eq_ignore_ascii_case(bare);
+    if words.iter().any(present) {
+        words.into_iter().filter(|w| !present(w)).collect::<Vec<_>>().join(" ")
+    } else if words.is_empty() {
+        term.to_string()
+    } else {
+        format!("{} {term}", words.join(" "))
+    }
+}
+
+const META_COLOR: Color32 = Color32::from_rgb(200, 160, 240);
+
+/// Colours the search text: `-` terms red, `~` terms blue, metatags purple, and the term with
+/// an error underlined.
+fn highlight_query(text: &str, error: Option<&std::ops::Range<usize>>, base: Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let font = FontId::proportional(15.0);
+    // Term ranges (whitespace outside quotes splits).
+    let mut terms: Vec<std::ops::Range<usize>> = Vec::new();
+    let (mut start, mut quoted) = (None, false);
+    for (i, c) in text.char_indices() {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        match (c.is_whitespace() && !quoted, start) {
+            (true, Some(s)) => {
+                terms.push(s..i);
+                start = None;
+            }
+            (false, None) => start = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        terms.push(s..text.len());
+    }
+    let color_of = |at: usize| -> Color32 {
+        let Some(r) = terms.iter().find(|r| r.contains(&at)) else { return base };
+        let t = text.get(r.clone()).unwrap_or("");
+        let body = t.trim_start_matches(['-', '~']);
+        let is_meta = body.split_once(':').is_some_and(|(n, _)| boorucraft_core::METATAGS.contains(&n.to_ascii_lowercase().as_str()));
+        if is_meta {
+            META_COLOR
+        } else if t.starts_with('-') {
+            Color32::from_rgb(235, 140, 130)
+        } else if t.starts_with('~') {
+            Color32::from_rgb(140, 185, 245)
+        } else {
+            base
+        }
+    };
+    let error = error.filter(|r| r.start < r.end && text.is_char_boundary(r.start) && r.end <= text.len() && text.is_char_boundary(r.end));
+    let mut cuts: Vec<usize> = vec![0, text.len()];
+    for r in &terms {
+        cuts.extend([r.start, r.end]);
+    }
+    if let Some(r) = error {
+        cuts.extend([r.start, r.end]);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let Some(piece) = text.get(a..b) else { continue };
+        let bad = error.is_some_and(|r| r.contains(&a));
+        let mut format = egui::TextFormat::simple(font.clone(), if bad { Color32::from_rgb(240, 120, 110) } else { color_of(a) });
+        if bad {
+            format.underline = Stroke::new(1.5, Color32::from_rgb(240, 90, 80));
+        }
+        job.append(piece, 0.0, format);
+    }
+    job
+}
+
 /// `#rrggbb` → colour.
 fn parse_color(s: &str) -> Option<Color32> {
     let hex = s.strip_prefix('#')?;
@@ -939,5 +1121,35 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn sidebar_clicks_toggle_terms() {
+        assert_eq!(toggle_term("", "cat"), "cat");
+        assert_eq!(toggle_term("dog", "cat"), "dog cat");
+        assert_eq!(toggle_term("dog  cat", "cat"), "dog");
+        assert_eq!(toggle_term("dog -cat", "cat"), "dog", "removes the excluded form too");
+        assert_eq!(toggle_term("dog", "-cat"), "dog -cat");
+        assert_eq!(toggle_term("rating:s cat", "rating:s"), "cat");
+        assert!(query_has("a -Cat b", "-cat"));
+        assert!(!query_has("cats", "cat"));
+    }
+
+    #[test]
+    fn highlighting_keeps_the_text_and_marks_the_error() {
+        let text = "cat -dog ~sky width:>big path:\"a b\" é";
+        let job = highlight_query(text, Some(&(14..24)), Color32::WHITE);
+        assert_eq!(job.text, text, "every byte is kept");
+        let underlined: String =
+            job.sections.iter().filter(|s| s.format.underline.width > 0.0).map(|s| &text[s.byte_range.start.0..s.byte_range.end.0]).collect();
+        assert_eq!(underlined, "width:>big");
+        let color_at = |at: usize| job.sections.iter().find(|s| (s.byte_range.start.0..s.byte_range.end.0).contains(&at)).map(|s| s.format.color);
+        assert_eq!(color_at(0), Some(Color32::WHITE));
+        assert_eq!(color_at(4), Some(Color32::from_rgb(235, 140, 130)));
+        assert_eq!(color_at(9), Some(Color32::from_rgb(140, 185, 245)));
+        assert_eq!(color_at(25), Some(META_COLOR), "quoted value stays one term");
+        // A stale error span past the end or inside a character is ignored, not a crash.
+        assert_eq!(highlight_query("é", Some(&(1..9)), Color32::WHITE).text, "é");
+        assert_eq!(highlight_query("", None, Color32::WHITE).text, "");
     }
 }

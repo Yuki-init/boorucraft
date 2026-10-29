@@ -8,7 +8,10 @@ pub mod query;
 pub mod rating;
 pub mod tag;
 
-pub use query::{Mode, Query, QueryError, TagPattern, Term, TermKind};
+pub use query::{
+    Cmp, DateField, DateSpec, DateValue, METATAG_HELP, Mode, NumField, NumRange, Order, OrderKey, Query, QueryError, TagPattern, Term, TermKind, TextMatch,
+    metatag_values, normalize_format,
+};
 pub use rating::Rating;
 pub use tag::{TagError, glob_match, is_valid_namespace, normalize_tag, split_namespace};
 

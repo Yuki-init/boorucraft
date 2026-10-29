@@ -2,13 +2,10 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **M2**: metatags (`width:`, `date:`, `type:`, `tagcount:`, `path:"…"`, `order:`…), quoted
-   values, autocomplete in the search bar, tag sidebar with counts and namespace colours.
-2. **M3**: perceptual hashes (dHash, pHash), BK-tree, `dupes:` metatag, review screen.
-3. **M4**: `notify` file watching, reload on outside changes to `collection.json` / `tags.json`,
+1. **M3**: perceptual hashes (dHash, pHash), BK-tree, `dupes:` metatag, review screen.
+2. **M4**: `notify` file watching, reload on outside changes to `collection.json` / `tags.json`,
    Tags screen, Unknown tags screen, rebuild from sidecars, saved searches, slideshow.
-4. **UI polish found in M1**: Tab to complete in the tag
-   input; fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
+3. **UI polish**: fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
    for videos (via PlayCraft's Rust decoders, see Later).
 
 ## Known limitations
@@ -28,3 +25,7 @@ Pick from the top. Each item names its milestone.
   do nothing there. Outside the container they use the system's default apps.
 - No CJK font is bundled: Japanese, Chinese and Korean text needs a system font (Noto CJK,
   Source Han, WenQuanYi, …); the app says so on start-up when none is found.
+- While a search has an error, the grid keeps showing the last good results (the count says how
+  many); the bad term is underlined.
+- Clicking a sidebar tag rebuilds the query from whitespace-separated words, so runs of spaces
+  inside a quoted `path:"…"` value collapse to one.

@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git build-essential \
         libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxkbcommon0 libxkbcommon-x11-0 \
         libwayland-client0 libwayland-cursor0 libwayland-egl1 libegl1 libvulkan1 mesa-vulkan-drivers \
-        xvfb xauth dbus-daemon xdg-utils \
+        xvfb xauth xdotool dbus-daemon xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/usr/local/rustup \

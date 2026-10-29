@@ -11,7 +11,7 @@ use boorucraft_store::{Collection, SearchIndex, StoreError, TagList, paths};
 
 const USAGE: &str = "usage:
   boorucraft-cli scan DIR                    index a folder (creates DIR/collection.json)
-  boorucraft-cli search DIR [QUERY...]       list matching files, newest first
+  boorucraft-cli search DIR [QUERY...]       list matching files (see Searches below)
   boorucraft-cli info DIR [FILE]             collection summary, or one file's details
   boorucraft-cli tag DIR FILE TAG... [--rating s|q|e|none] [--source URL|none] [--create]
                                              TAG adds, -TAG removes; --create adds new tags to the list
@@ -25,7 +25,11 @@ const USAGE: &str = "usage:
   boorucraft-cli tags namespaces
   boorucraft-cli tags add-namespace NAME [COLOR]
 
-Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)  rating:s,q
+Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
+  rating:s,q  width:>1920  height:<=1080  ratio:16:9  mpixels:>2  filesize:<2MB
+  type:png,gif  kind:video  animated:yes  missing:yes  tagcount:0  md5:…  hash:3fa9
+  date:2024-01..2024-06  date:>2023-05-01  imported:<7d  path:\"holiday 2023\"  source:none
+  order:date  order:-filesize  order:name  order:random  (default: newest imported first)
 Environment: BOORUCRAFT_TAGS (tag list file), BOORUCRAFT_CONFIG_DIR, BOORUCRAFT_CACHE_DIR";
 
 fn main() -> ExitCode {

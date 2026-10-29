@@ -1,7 +1,7 @@
 //! Everything the window shows, without egui: the tag list, the open collections, background
 //! scans, searches across collections, edits and debounced saves.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use boorucraft_core::{Query, Rating};
 use boorucraft_index::{ScanCache, ScanReport, SidecarReport, scan, write_sidecars};
-use boorucraft_store::{Collection, FileEntry, SearchIndex, StoreError, TagList, paths, safefile};
+use boorucraft_store::{Collection, FileEntry, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
 use serde::{Deserialize, Serialize};
 
 /// How long after the last edit collection.json and the sidecars are saved.
@@ -122,10 +122,23 @@ pub struct Library {
     pub query_error: Option<(String, std::ops::Range<usize>)>,
     /// Messages for the user (errors and notes), newest last.
     pub messages: Vec<(String, Instant)>,
+    /// Tags of the current results with counts, most used first.
+    pub result_tags: Vec<(String, u64)>,
+    /// Ratings of the current results: safe, questionable, explicit, none.
+    pub result_ratings: [u64; 4],
+    /// Tag counts over every open collection (for autocomplete); `None` until next asked for.
+    usage: Option<Vec<(String, u64)>>,
+    /// Shuffles `order:random`; fixed for the session so results don't jump around.
+    seed: u64,
     scan_tx: Sender<ScanDone>,
     scan_rx: Receiver<ScanDone>,
     /// Called when a background job finishes, to wake the UI.
     waker: Arc<dyn Fn() + Send + Sync>,
+}
+
+fn seed_now() -> u64 {
+    let t = chrono::Utc::now();
+    (t.timestamp() as u64).wrapping_mul(1_000_000_007) ^ u64::from(t.timestamp_subsec_nanos())
 }
 
 fn name_of(root: &Path) -> String {
@@ -150,7 +163,23 @@ impl Library {
         };
         let session_only = session_collections.is_some();
         let roots = session_collections.unwrap_or_else(|| config.collections.clone());
-        let mut lib = Library { tags, colls: Vec::new(), config, dirs, session_only, hits: Vec::new(), query_error: None, messages, scan_tx, scan_rx, waker };
+        let mut lib = Library {
+            tags,
+            colls: Vec::new(),
+            config,
+            dirs,
+            session_only,
+            hits: Vec::new(),
+            query_error: None,
+            messages,
+            result_tags: Vec::new(),
+            result_ratings: [0; 4],
+            usage: None,
+            seed: seed_now(),
+            scan_tx,
+            scan_rx,
+            waker,
+        };
         for root in roots {
             lib.open_collection(&root, false);
         }
@@ -197,6 +226,7 @@ impl Library {
                     oc.sidecars_pending.extend(changed);
                 }
                 self.colls.push(oc);
+                self.usage = None;
                 (None, root)
             }
             Err(e) => (Some(e.to_string()), root.to_path_buf()),
@@ -231,6 +261,7 @@ impl Library {
         }
         self.flush(idx);
         let oc = self.colls.remove(idx);
+        self.usage = None;
         self.config.collections.retain(|p| *p != oc.root);
         if !self.session_only {
             self.save_config();
@@ -296,6 +327,7 @@ impl Library {
             {
                 let Some(oc) = self.colls.get_mut(coll) else { continue };
                 oc.index = SearchIndex::build(&c);
+                self.usage = None;
                 oc.state = CollState::Ready { c, cache };
                 oc.last_report = Some(summary);
                 name = oc.name.clone();
@@ -310,9 +342,10 @@ impl Library {
         changed
     }
 
-    /// Runs a query over every ready collection; newest imported first.
+    /// Runs a query over every ready collection, sorted by its `order:` (default: newest
+    /// imported first) across all of them.
     pub fn search(&mut self, text: &str) {
-        let query = match Query::parse(text) {
+        let mut query = match Query::parse(text) {
             Ok(q) => {
                 self.query_error = None;
                 q
@@ -322,17 +355,58 @@ impl Library {
                 return;
             }
         };
-        let mut hits: Vec<(chrono::DateTime<chrono::Utc>, Hit)> = Vec::new();
+        query.seed = self.seed;
+        let now = chrono::Utc::now();
+        let mut rows: Vec<(usize, &Row)> = Vec::new();
         for (i, oc) in self.colls.iter().enumerate() {
-            let Some(c) = oc.collection() else { continue };
-            for hash in oc.index.search(&query) {
-                if let Some(e) = c.get(hash) {
-                    hits.push((e.imported, Hit { coll: i, hash: hash.to_string() }));
-                }
+            if oc.collection().is_some() {
+                rows.extend(oc.index.matching_rows(&query, now).into_iter().map(|r| (i, r)));
             }
         }
-        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.hash.cmp(&b.1.hash)));
-        self.hits = hits.into_iter().map(|(_, h)| h).collect();
+        rows.sort_by(|a, b| compare_rows(query.order.as_ref(), query.seed, a.1, b.1).then(a.0.cmp(&b.0)));
+        self.hits = rows.into_iter().map(|(coll, r)| Hit { coll, hash: r.hash.clone() }).collect();
+        self.recount();
+    }
+
+    /// Recounts the tags and ratings of the current results (after a search or an edit).
+    pub fn recount(&mut self) {
+        let mut tags: HashMap<&str, u64> = HashMap::new();
+        let mut ratings = [0u64; 4];
+        for hit in &self.hits {
+            let Some(e) = self.entry(hit) else { continue };
+            for t in &e.tags {
+                *tags.entry(t.as_str()).or_default() += 1;
+            }
+            let slot = e.rating.map_or(3, Rating::index);
+            if let Some(n) = ratings.get_mut(slot) {
+                *n += 1;
+            }
+        }
+        let mut sorted: Vec<(String, u64)> = tags.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        self.result_tags = sorted;
+        self.result_ratings = ratings;
+    }
+
+    /// How many files use each tag, over every open collection, most used first. Call
+    /// [`Self::refresh_usage`] first in a frame.
+    pub fn usage(&self) -> &[(String, u64)] {
+        self.usage.as_deref().unwrap_or_default()
+    }
+
+    /// Recounts [`Self::usage`] if anything changed since.
+    pub fn refresh_usage(&mut self) {
+        if self.usage.is_none() {
+            let mut counts: HashMap<&str, u64> = HashMap::new();
+            for oc in &self.colls {
+                for (t, n) in oc.index.tag_counts() {
+                    *counts.entry(t).or_default() += n;
+                }
+            }
+            let mut sorted: Vec<(String, u64)> = counts.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            self.usage = Some(sorted);
+        }
     }
 
     pub fn entry(&self, hit: &Hit) -> Option<&FileEntry> {
@@ -430,6 +504,8 @@ impl Library {
                 oc.index = SearchIndex::build(c);
             }
         }
+        self.usage = None;
+        self.recount();
     }
 
     /// Adds a tag to the central list. Returns its normalised name.
@@ -529,8 +605,12 @@ mod tests {
     }
 
     fn library(tmp: &Path, pics: &Path) -> Library {
+        libraries(tmp, &[pics])
+    }
+
+    fn libraries(tmp: &Path, pics: &[&Path]) -> Library {
         let dirs = Dirs { config: tmp.join("cfg"), cache: tmp.join("cache"), tags: tmp.join("cfg/tags.json") };
-        let mut lib = Library::new(dirs, Config::default(), Some(vec![pics.to_path_buf()]), Arc::new(|| {}));
+        let mut lib = Library::new(dirs, Config::default(), Some(pics.iter().map(|p| p.to_path_buf()).collect()), Arc::new(|| {}));
         let start = Instant::now();
         while lib.is_scanning() {
             assert!(start.elapsed() < Duration::from_secs(20), "scan never finished");
@@ -576,6 +656,38 @@ mod tests {
         assert_eq!(lib.hits.len(), 1);
         lib.search("blue_sky -rating:s");
         assert_eq!(lib.hits.len(), 1);
+    }
+
+    #[test]
+    fn results_from_several_collections_are_sorted_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (one, two) = (tmp.path().join("one"), tmp.path().join("two"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        picture(&one.join("b.png"), 1);
+        picture(&two.join("a.png"), 2);
+        picture(&two.join("c.png"), 3);
+        picture(&one.join("d.png"), 4);
+        let mut lib = libraries(tmp.path(), &[&one, &two]);
+        let names = |lib: &Library| -> Vec<String> { lib.hits.iter().map(|h| lib.entry(h).unwrap().paths.iter().next().unwrap().clone()).collect() };
+        lib.search("order:name");
+        assert_eq!(names(&lib), vec!["a.png", "b.png", "c.png", "d.png"]);
+        lib.search("order:-name");
+        assert_eq!(names(&lib), vec!["d.png", "c.png", "b.png", "a.png"]);
+        lib.search("order:name width:>100");
+        assert!(lib.hits.is_empty());
+        lib.search("width:..");
+        assert!(lib.query_error.is_some(), "errors are reported");
+
+        // The sidebar counts follow the results, and edits.
+        lib.search("");
+        lib.create_tag("cat");
+        let first = lib.hits[..1].to_vec();
+        lib.edit_tags(&first, &["cat".into()], &[]);
+        assert_eq!(lib.result_tags, vec![("cat".to_string(), 1)]);
+        assert_eq!(lib.result_ratings, [0, 0, 0, 4]);
+        lib.refresh_usage();
+        assert_eq!(lib.usage(), &[("cat".to_string(), 1)]);
     }
 
     #[test]

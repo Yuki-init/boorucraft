@@ -12,6 +12,13 @@ exec "$REPO_ROOT/scripts/dev.sh" bash -c '
   cargo build --quiet -p boorucraft
   out="$1"; shift
   export BOORUCRAFT_CONFIG_DIR=/work/.cache/shot-config BOORUCRAFT_CACHE_DIR=/work/.cache/shot-cache
-  xvfb-run -a -s "-screen 0 1280x800x24" timeout -s KILL 90 target/debug/boorucraft "$@" --screenshot "$out"
+  # Xvfb has no window manager, so give the window keyboard focus by hand (egui only treats a
+  # text box as focused while its window is): needed to see autocomplete with --focus.
+  xvfb-run -a -s "-screen 0 1280x800x24" bash -c '\''
+    timeout -s KILL 90 target/debug/boorucraft "$@" &
+    app=$!
+    timeout 20 xdotool search --sync --name "^BooruCraft$" windowfocus >/dev/null 2>&1 || true
+    wait $app
+  '\'' app "$@" --screenshot "$out"
   test -f "$out" && echo "saved $out"
 ' screenshot "$out" "$@"

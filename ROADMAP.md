@@ -1,14 +1,14 @@
 # BooruCraft roadmap
 
 **Stage:** pre-alpha. The desktop app opens folders, shows a thumbnail grid and a viewer, searches
-with tags and ratings, and edits tags (saved to `collection.json` and XMP sidecars). Design:
+with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to `collection.json` and XMP sidecars). Design:
 [docs/design.md](docs/design.md). Ranked work list: [docs/gaps.md](docs/gaps.md).
 
 | Milestone | Goal | Status |
 |---|---|---|
 | M0 | Repo, Podman gate (copy PlayCraft's scripts), workspace, Rust-only dependency check, central `tags.json` and `collection.json` formats with atomic save, backup and lock, in-memory tag index, XMP sidecar read/update that keeps other apps' fields, scanner (hash, metadata, path tracking), `boorucraft-cli scan / info / tag / search` with plain tags | done |
 | M1 | Desktop app: add and open collection folders, thumbnail cache and worker pool, virtualised grid, viewer (zoom, pan, next/prev, animation), open unsupported formats in the default app, tag editor with the central tag list and "Create tag", bulk tagging, ratings | done |
-| M2 | Full search syntax (negation, OR, wildcards, every metatag, `order:`), error underline, autocomplete, tag sidebar with counts, namespaces and colours | |
+| M2 | Full search syntax (negation, OR, wildcards, every metatag, `order:`), error underline, autocomplete, tag sidebar with counts, namespaces and colours | done |
 | M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates) | |
 | M4 | File watching, reload on outside changes, missing-file handling, Tags screen (rename/merge/delete across all collections, catch-up for closed ones), Unknown tags review, reading back sidecars edited by other apps, rebuild from sidecars, saved searches, slideshow | |
 | Later | Tag aliases and implications; import tags from boorus by MD5; local ML auto-tagger; pools/collections; video thumbnails via PlayCraft's Rust decoders | |
@@ -44,3 +44,14 @@ with tags and ratings, and edits tags (saved to `collection.json` and XMP sideca
   written by another program. `cargo xtask rust-only` now also checks what the build links:
   only `dl` (x11-dl). `scripts/run.sh` and `scripts/screenshot.sh` added; checked with Xvfb
   screenshots against a copy of the sample folder.
+- 2026-10-29 — M2: every metatag in the parser (`width`, `height`, `ratio`, `mpixels`,
+  `filesize`, `type`, `kind`, `animated`, `date`, `imported`, `tagcount`, `path`, `missing`,
+  `md5`, `hash`, `source`) with comparisons, ranges, units, ages and quoted values, and `order:`
+  (one comparator shared by the CLI and by results merged across collections). The search bar
+  colours terms, underlines the bad one and explains it with an example; autocomplete (egui's
+  completion popup) offers tags by use count in namespace colours, metatag names and values;
+  the tag editor completes from the central list the same way. A sidebar lists the ratings and
+  tags of the current results with counts, grouped by namespace; click adds or removes a term,
+  Ctrl+click excludes. Grid tiles stretch to fill the row. Fixed: focusing a text box from the
+  keyboard (`/`, `t`) didn't stick, and the cursor now lands at the end. `scripts/screenshot.sh`
+  gives the Xvfb window focus (xdotool) so popups show in screenshots.

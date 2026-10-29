@@ -18,7 +18,7 @@ pub mod taglist;
 
 pub use collection::{Collection, CollectionSettings, FileEntry, Kind, SidecarMode};
 pub use error::StoreError;
-pub use index::SearchIndex;
+pub use index::{Row, SearchIndex, compare_rows};
 pub use taglist::{HistoryEntry, HistoryOp, TagList};
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N]
-//!            [--screenshot OUT.png [--after SECONDS]] [--size WxH]
+//!            [--focus search|tags] [--screenshot OUT.png [--after SECONDS]] [--size WxH]
 //! ```
 //!
 //! `--collection` opens folders for this session only (they aren't remembered).
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use boorucraft_ui_egui::{App, Options};
 
-const USAGE: &str = "usage: boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N] [--screenshot OUT.png [--after SECONDS]] [--size WxH]";
+const USAGE: &str = "usage: boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N] [--focus search|tags] [--screenshot OUT.png [--after SECONDS]] [--size WxH]";
 
 struct Args {
     options: Options,
@@ -31,6 +31,13 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--collection" => options.collections.get_or_insert_with(Vec::new).push(PathBuf::from(value("--collection")?)),
             "--query" => options.query = Some(value("--query")?),
+            "--focus" => {
+                let f = value("--focus")?;
+                if f != "search" && f != "tags" {
+                    return Err("--focus takes search or tags".into());
+                }
+                options.focus = Some(f);
+            }
             "--select" => options.select.push(value("--select")?.parse().map_err(|_| "--select needs a number")?),
             "--view" => options.view = Some(value("--view")?.parse().map_err(|_| "--view needs a number")?),
             "--screenshot" => options.screenshot = Some(PathBuf::from(value("--screenshot")?)),
