@@ -1,0 +1,16 @@
+[package]
+name = "boorucraft-xmp"
+description = "Reads and updates XMP sidecars, keeping every field that other apps wrote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+boorucraft-core = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }

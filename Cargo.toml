@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[workspace.dependencies]
+# Layer L0: data types and the query language.
+boorucraft-core = { path = "crates/core" }
+# Layer L1: the tag list and collections on disk, the in-memory index; XMP sidecars.
+boorucraft-store = { path = "crates/store" }
+boorucraft-xmp = { path = "crates/xmp" }
+# Layer L2: scanning folders.
+boorucraft-index = { path = "crates/index" }
+
+# Rust crates only (AGENTS.md §2); `cargo xtask rust-only` checks Cargo.lock.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "now"] }
+roaring = "0.12"
+quick-xml = "0.42"
+walkdir = "2"
+rayon = "1"
+sha2 = "0.11"
+md-5 = "0.11"
+imagesize = "0.15"
+kamadak-exif = "0.6"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

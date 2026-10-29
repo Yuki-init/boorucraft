@@ -1,0 +1,328 @@
+# BooruCraft design
+
+A desktop app for organising and viewing a local picture collection the way a booru site does:
+every file has tags, and you find files by searching tags and other properties.
+
+## Decisions
+
+| # | Decision | Why |
+|---|---|---|
+| D1 | Desktop app with egui/eframe (wgpu), same stack as PlayCraft | One binary, fast thumbnail grid, shared know-how and UI pieces |
+| D2 | Rust libraries only (see "Rust-only rule") | The user's rule; also keeps builds simple and portable |
+| D3 | A collection is a folder; its data lives in `collection.json` inside that folder | Tags travel with the pictures, human-readable, no database needed |
+| D4 | Never move, rename or change the user's files; the only files written to the folder are `collection.json` (with its `.bak` and lock file) and XMP sidecars | The folder stays usable without the app |
+| D4a | Tags and rating are also written to an XMP sidecar next to each file (`cat.png.xmp`) | Other photo apps (digiKam, darktable, Lightroom…) can read the tags; tags survive even without `collection.json` |
+| D4b | One central tag list (`~/.config/boorucraft/tags.json`) defines the valid tags and namespaces for every collection | The same tag means the same thing everywhere; no typo variants; renames apply to all collections |
+| D5 | Identify a file by its content hash (SHA-256), not its path | Tags survive moves and renames; exact duplicates fall out for free |
+| D6 | Store MD5 as well | Danbooru, Gelbooru and others look posts up by MD5, so tags can be imported later |
+| D7 | All data is held in memory; search runs on in-memory indexes (roaring bitmaps) | Instant search; JSON is only read at open and written on save |
+| D8 | Booru search syntax, parsed by our own parser | Familiar to booru users |
+| D9 | Near-duplicate detection with 64-bit perceptual hashes and Hamming distance | Cheap to compute and store; finds resizes and re-encodes |
+| D10 | Formats the app can't decode itself are still indexed, tagged and searched, but open in the system's default app | Videos, AVIF, HEIC etc. stay part of the collection without C decoders |
+| D11 | Build and test only in Podman | Same habits as PlayCraft |
+
+## Rust-only rule (D2)
+
+- Every dependency is a Rust crate. No C or C++ is compiled into the binary: no `-sys` crates that
+  build bundled C code, no `cc`/`cmake` build steps. `scripts/check.sh` fails if `cc`, `cmake` or
+  a `*-sys` crate with bundled sources shows up in `cargo tree`.
+- Allowed: talking to libraries the operating system already provides, the way every desktop app
+  does (graphics drivers through wgpu, X11/Wayland, the desktop portal). Nothing from these is
+  bundled.
+- Crates are configured to stay pure: `image` with only its Rust decoders, `rfd` with the
+  `xdg-portal` backend (not GTK).
+- `cargo xtask rust-only` fails if Cargo.lock contains a C build or link crate (`cc`, `cmake`,
+  `bindgen`, `pkg-config`…) or a `-sys` crate not on its short list of pure-Rust ones. This is
+  why the hash is SHA-256 (`sha2`): the `blake3` crate always pulls in `cc`, even in pure mode.
+- Licences: permissive only (checked by `cargo deny`). This is why config and cache folders are
+  found by our own code instead of the `dirs` crate, which pulls in an MPL-2.0 dependency.
+
+Crates: `serde` + `serde_json`, `sha2`, `md-5`, `quick-xml`, `roaring`, `walkdir`, `rayon`,
+`imagesize`, `kamadak-exif`, `chrono`, `thiserror` (in use since M0); planned: `eframe`/`egui`, `image`
+(JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI), `jxl-oxide`, `notify`, `open`, `trash`, `rfd`.
+
+## Workspace layout
+
+```
+crates/
+  core/      data types, query parser and AST (no IO, heavily unit-tested)
+  store/     central tag list, collection.json format, load/save, locking, in-memory indexes, search
+  xmp/       reading and updating XMP sidecars without losing other apps' data
+  index/     folder scanning, hashing, metadata, thumbnails, file watching
+  dedup/     perceptual hashes, BK-tree, duplicate groups
+  ui-egui/   search bar, grid, viewer, tag editor, duplicates view
+apps/
+  boorucraft/      the desktop app
+  boorucraft-cli/  headless scan / search / tag / dupes, for tests and scripting
+```
+
+Dependencies only point downwards: `core` <- `store`, `xmp`, `dedup` <- `index` <- `ui-egui` <- apps.
+
+## Central tag list (D4b)
+
+`~/.config/boorucraft/tags.json` is the one list of valid tags, shared by every collection. Its
+location can be changed in settings, e.g. to a synced folder so several computers share it.
+
+```json
+{
+  "format": "boorucraft-tags",
+  "version": 1,
+  "revision": 42,
+  "namespaces": {
+    "artist":    { "color": "#d04040" },
+    "character": { "color": "#40a040" },
+    "series":    { "color": "#a040c0" },
+    "meta":      { "color": "#e09030" }
+  },
+  "tags": {
+    "artist:foo": { "description": "" },
+    "cat":        { "description": "Domestic cats, any breed" },
+    "sky":        {}
+  },
+  "history": [
+    { "revision": 41, "op": "rename", "from": "kitty", "to": "cat" },
+    { "revision": 42, "op": "merge", "from": ["feline"], "into": "cat" }
+  ]
+}
+```
+
+- **Only listed tags can be applied.** Typing a tag that isn't in the list offers the closest
+  existing tags first, then "Create tag `xyz`", which adds it to the central list.
+- **Collections store tag names, not IDs**, so `collection.json` and the sidecars stay readable and
+  the folder stays meaningful on its own.
+- **Rename, merge and delete** go through the central list and are recorded in `history` with a
+  new `revision`. Open collections are updated straight away (JSON and sidecars). Each
+  `collection.json` records the `tags_revision` it was last synced to, so a collection that wasn't
+  open at the time (e.g. on an unplugged drive) catches up from `history` the next time it opens.
+- **Unknown tags**: tags in a collection that aren't in the central list, e.g. from a folder
+  copied from another computer or tags added by another app in a sidecar. They are listed on an
+  "Unknown tags" screen with three choices for each: add to the central list, map to an existing
+  tag, or remove. Until then they are kept and searchable, but shown in grey.
+- Saved with the same safety rules as `collection.json`: debounced, atomic, `.bak`, lock.
+- Later: aliases (`kitty` → `cat`) and implications (`cat` → `animal`) live here too.
+
+Counts per tag are not stored; they are computed in memory for the open collections.
+
+## Collections and `collection.json` (D3, D4)
+
+A collection is any folder you add, e.g. `~/Pictures/Anime`. The app's own settings
+(`~/.config/boorucraft/config.json`) only list which collections are open. Searches can cover
+one collection or all open ones.
+
+```json
+{
+  "format": "boorucraft-collection",
+  "version": 1,
+  "files": {
+    "9f2c…b71a": {
+      "md5": "5d41…2a7c",
+      "paths": ["2024/cat.png", "favourites/cat copy.png"],
+      "kind": "image",
+      "format": "png",
+      "size": 1834211,
+      "width": 2560,
+      "height": 1440,
+      "animated": false,
+      "taken": "2024-03-02T14:11:09Z",
+      "imported": "2026-10-29T21:30:00Z",
+      "rating": "s",
+      "source": "https://example.org/post/123",
+      "tags": ["artist:foo", "cat", "sky"],
+      "phash": "c3a1f00e9b7d2244",
+      "dhash": "0f0f3c3c7e7e1818"
+    }
+  },
+  "not_duplicates": [["9f2c…b71a", "41be…07d3"]],
+  "tags_revision": 42
+}
+```
+
+- Entries are keyed by SHA-256 hash. Paths are relative to the collection folder, use `/`, and a
+  file can have several (exact copies).
+- Saved pretty-printed, with keys, tags and paths sorted, so diffs are small and the file works
+  well in git or backups.
+- `phash`/`dhash` are stored here because recomputing them means decoding every picture again.
+- `version` allows migrations; an older app refuses a newer file instead of damaging it.
+- A subfolder that has its own `collection.json` is a separate collection and is skipped by the
+  parent's scan.
+- Missing files (no path found on disk) keep their entry, marked missing in the UI, so tags come
+  back if the file reappears (matched by hash). The user can purge them.
+
+### Saving safely
+
+- **Debounced**: saves about 2 seconds after the last change, and on close.
+- **Atomic**: write `collection.json.tmp`, flush it to disk, then rename it over `collection.json`.
+  The previous version is kept as `collection.json.bak`.
+- **Lock**: `collection.json.lock` (holding the process ID and host name) is created when a
+  collection is opened. A second app instance opens it read-only; a stale lock from a crashed
+  process on the same machine is detected and replaced (Linux; elsewhere the message says which
+  file to delete).
+- **Changed by someone else**: if `collection.json` changed on disk since the last load or save
+  (another tool, a sync program), the app reloads it and asks before saving over it.
+- **Damaged file**: if it doesn't parse, the app offers to load `.bak` and never overwrites
+  the damaged file.
+
+Expected size: about 300–400 bytes per file, so 100k files ≈ 35 MB of JSON, loaded and indexed
+in well under a second. If saving ever becomes slow at very large sizes, the fallback is an
+append-only change log (`collection.log`, JSON lines) compacted into `collection.json` now and
+then. This isn't needed for v1.
+
+## XMP sidecars (D4a)
+
+Every tagged file gets a sidecar named `<file name>.xmp` next to it (`2024/cat.png` →
+`2024/cat.png.xmp`), the convention digiKam and darktable use. A setting switches to the
+Lightroom style (`cat.xmp`) per collection. A file with several paths gets a sidecar at each path.
+
+What BooruCraft writes:
+
+| XMP field | Content |
+|---|---|
+| `dc:subject` | all tags as plain keywords: `cat`, `sky`, `artist:foo` |
+| `lr:hierarchicalSubject` | namespaced tags as hierarchies: `artist|foo`, so Lightroom and digiKam show them as a tree |
+| `boorucraft:Rating` | `s`, `q` or `e` (own namespace; the star rating `xmp:Rating` is left alone) |
+| `boorucraft:Source` | source URL |
+| `boorucraft:Hash` | SHA-256, to link the sidecar back to its file |
+
+**Other apps' data is kept.** darktable stores its edit history in the same file, and other apps
+add their own fields. The keyword fields are shared, so BooruCraft also keeps other apps'
+keywords in them: darktable's own tree (`darktable|format|jpg`) and the parent levels of keyword
+hierarchies (`Places` and `Europe` for `Places|Europe|France`) stay in the file but are not read as
+tags. BooruCraft reads an existing sidecar with `quick-xml`, replaces only the
+fields above, and writes everything else back untouched. Sidecars are written atomically
+(temp file + rename) by a background writer, debounced like `collection.json`.
+
+**Source of truth**: `collection.json`. Sidecars are a mirror, with two exceptions:
+
+- **Edited by another app**: during a scan, a sidecar whose modification time differs from the
+  one recorded after BooruCraft's last write or read is read back. If BooruCraft wrote it before
+  (it has `boorucraft:Hash`), its tags replace the file's tags; if not (a sidecar from another
+  app), its tags are added and nothing is removed. Tags not in the central list go to the
+  "Unknown tags" screen. A setting turns this off.
+- **Rebuild**: if `collection.json` is lost, "Rebuild from sidecars" recreates tags, ratings and
+  sources from the XMP files.
+
+Sidecars are never counted as collection files, and a sidecar without a matching file is left
+alone. A setting turns sidecars off for a collection, and "Remove sidecars" deletes only the
+sidecars BooruCraft created that hold no data from other apps.
+
+### Cache (outside the collection)
+
+`~/.cache/boorucraft/thumbs/ab/cdef….jpg` (PNG when the picture has transparency), keyed by
+SHA-256 and shared by all collections. Safe to delete; thumbnails are regenerated on demand.
+
+## In-memory index (D7)
+
+On load, each file gets a dense number (0..n). The store builds:
+
+- a roaring bitmap per tag (which files have it), plus bitmaps per rating, kind and format;
+- columns for size, width, height, dates and tag count, for range filters and sorting;
+- a sorted tag list with counts, for autocomplete and the sidebar;
+- a path → file map, used by the scanner.
+
+Edits update the indexes and mark the collection and the affected sidecars dirty for the next save.
+
+## Indexing
+
+1. The scanner walks the collection folder (`walkdir`), skipping hidden folders, symlinks and
+   nested collections, and hashes new or changed files in parallel (`rayon`).
+2. A path whose size and mtime haven't changed since the last scan is skipped. Size and mtime are
+   kept in memory and in a small scan cache in `~/.cache`. They aren't stored in `collection.json`,
+   since copying a folder changes mtimes.
+3. Otherwise the file is hashed (SHA-256 + MD5). A known hash just gets the new path attached,
+   so moved files keep their tags. A picture edited in place (same path, new content) passes
+   its tags, rating and source on to the new content.
+4. Metadata: dimensions and format from `imagesize` (headers only, so this works for AVIF, HEIC
+   etc. too; not for camera raw files, whose header describes a small preview), EXIF date from
+   `kamadak-exif`, otherwise mtime; animation from the GIF/PNG/WebP headers.
+5. For decodable images: thumbnail and perceptual hashes on a worker pool. The grid shows
+   placeholders until each is ready.
+6. Sidecars: a newer-than-expected `.xmp` is read back (see XMP sidecars); a tagged file without
+   one gets it written.
+7. While the app runs, `notify` watches the folder and queues changed paths for steps 2–6.
+
+Which files are included: known picture and video extensions by default (jpg, png, gif, webp,
+bmp, tiff, jxl, avif, heic, mp4, webm, mkv, mov…). The list is configurable per collection.
+`.xmp` files and BooruCraft's own files are always excluded.
+
+## Formats (D10)
+
+| | Decoded by the app | Opened externally |
+|---|---|---|
+| Formats | JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI, JPEG XL | AVIF, HEIC/HEIF, videos (MP4, WebM, MKV, MOV…), RAW photos, anything else |
+| Thumbnail | yes | format icon with a label (e.g. "MP4", "HEIC") |
+| In-app viewer | yes (zoom, pan, animation) | the viewer shows the format icon and an "Open in default app" button; Enter / double-click opens it directly |
+| Tags, rating, search | yes | yes |
+| Dimensions | yes | from headers where `imagesize` supports it (AVIF, HEIC); otherwise unknown |
+| Exact duplicates | yes | yes (hash) |
+| Near duplicates | yes | no (needs decoded pixels) |
+
+Opening externally uses the `open` crate, which hands the file to the desktop's default app
+(`xdg-open` on Linux). Every file, decodable or not, also has "Open in default app" and
+"Show in file manager" actions.
+
+Later option: video thumbnails and dimensions via PlayCraft's pure-Rust H.264 decoder and
+container crates. Playback would still go to the system player.
+
+## Search syntax (D8)
+
+| Query | Meaning |
+|---|---|
+| `cat sky` | has both tags |
+| `-dog` | doesn't have the tag |
+| `~cat ~dog` | has at least one of them |
+| `cat*` | wildcard on the tag name |
+| `artist:foo` | namespaced tag |
+| `rating:s` / `rating:q,e` | rating (also `-rating:e`) |
+| `width:>1920` `height:<=1080` `ratio:16:9` `mpixels:>2` | size |
+| `filesize:>2MB` `type:png` `kind:video` `animated:yes` | file |
+| `date:2024` `date:2024-01..2024-06` `date:>2023-05-01` | taken date (EXIF, else mtime) |
+| `imported:<7d` | added recently |
+| `tagcount:0` `tagcount:>10` | `tagcount:0` finds untagged files |
+| `path:"holiday 2023"` | substring of any path |
+| `dupes:yes` `missing:yes` | has a near-duplicate / file is missing |
+| `order:date` `order:-date` `order:size` `order:tagcount` `order:random` | sort order (default: newest imported) |
+
+The parser lives in `core` and returns an AST with error positions, so the search bar can
+underline mistakes. The store evaluates it with bitmap operations: AND for plain tags, OR for `~`
+groups, subtracting for `-`, and wildcards as the union of matching tag bitmaps. Metatags filter
+the columns. The result is then sorted. Results come back as a list of file numbers, so the grid
+can page through them freely.
+
+Autocomplete suggests tags by prefix, ordered by count, shows the namespace colour, and also
+completes metatag names.
+
+## Duplicate detection (D9)
+
+- **Exact**: same SHA-256, including the same picture in two open collections. One entry with
+  several paths inside a collection.
+- **Near**: dHash and pHash (64 bits each) from the decoded image. Two pictures are candidates if
+  both distances are at most a threshold (default 8, adjustable). Candidates are found with a
+  BK-tree built in memory when a collection is opened.
+- **Review screen**: groups shown side by side with resolution, size, format and paths.
+  Actions: keep the best one (move the others to the system trash with the `trash` crate, only
+  after confirmation), merge tags into the one kept, or mark "not duplicates" (saved in
+  `not_duplicates`).
+
+## UI
+
+- **Top**: search bar with autocomplete and error underline; result count; collection picker.
+- **Left**: tag sidebar for the current results (tags with counts, grouped by namespace; click to
+  add, ctrl-click to exclude).
+- **Centre**: virtualised thumbnail grid, adjustable size; multi-select with shift and ctrl.
+- **Viewer**: fit, 1:1, zoom and pan, next/previous within the results, GIF/WebP animation,
+  slideshow, fullscreen. Unsupported formats open externally (D10).
+- **Tag editor**: on the viewer and on a multi-selection (bulk add/remove), with
+  autocomplete from the central tag list; type `artist:` to set a namespace. New tags need an
+  explicit "Create tag".
+- **Tags** screen: the central list with counts in the open collections; create, describe,
+  rename, merge, delete, namespace colours; the "Unknown tags" review.
+- **Duplicates** tab and **Collections** settings (add/remove folders, rescan, included file
+  types, sidecar on/off and naming, thumbnail cache size, tag list location, rebuild from
+  sidecars).
+
+Keyboard first: `/` focuses search, arrows move through the grid, `Enter` opens, `t` edits tags,
+`1`/`2`/`3` set the rating, `o` opens in the default app.
+
+## Open questions
+
+None at the moment.

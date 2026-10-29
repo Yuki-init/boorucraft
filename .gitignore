@@ -1,0 +1,8 @@
+*~
+/target
+/dist
+/.cache
+.DS_Store
+.claude/worktrees/
+.claude/memory/
+scripts/local.env

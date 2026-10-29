@@ -1,0 +1,23 @@
+[package]
+name = "boorucraft-cli"
+description = "BooruCraft from the command line: scan, tag and search collections"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "boorucraft-cli"
+path = "src/main.rs"
+
+[dependencies]
+boorucraft-core = { workspace = true }
+boorucraft-store = { workspace = true }
+boorucraft-index = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
