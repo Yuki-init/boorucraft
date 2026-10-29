@@ -10,9 +10,11 @@ notes; if the two disagree, **this file wins**.
 ## 1. Rust crates only
 
 - Every dependency is a Rust crate. No C or C++ is compiled into or linked by the program: no
-  `cc`, `cmake`, `bindgen`, `pkg-config` or `-sys` crates that build or find C libraries.
-  `cargo xtask rust-only` enforces this on Cargo.lock. Talking to libraries the operating system
-  provides at run time (graphics drivers through wgpu, X11/Wayland, the desktop portal) is fine.
+  `cmake`, `bindgen` or `-sys` crates that build or find C libraries, and `cc` / `pkg-config`
+  only as optional build steps that stay switched off. `cargo xtask rust-only` enforces this on
+  Cargo.lock and on what the build actually links (only `dl` is allowed). Talking to libraries
+  the operating system provides at run time (graphics drivers through wgpu, X11/Wayland, the
+  desktop portal) is fine.
 - Formats the app can't decode in Rust are still indexed, tagged and searched, and open in the
   system's default app (`open` crate). Never add a C decoder to show them.
 - Permissive licences only (`cargo deny`): no GPL, LGPL or MPL dependencies.
@@ -48,9 +50,9 @@ People trust an organiser with their only copy of their pictures. **This outrank
 |---|---|
 | L0 | `core`: tag names, ratings, the query language (no IO) |
 | L1 | `store`: tag list, collection.json, saving and locking, search index; `xmp`: sidecars |
-| L2 | `index`: scanning, hashing, metadata, sidecar sync |
-| L3 | `ui-egui` (planned) |
-| L4 | apps: `boorucraft-cli`, `boorucraft` desktop (planned) |
+| L2 | `index`: scanning, hashing, metadata, sidecar sync; `thumbs`: decoding, thumbnail cache |
+| L3 | `ui-egui`: the window (search, grid, viewer, tag editor) |
+| L4 | apps: `boorucraft-cli`, `boorucraft` desktop |
 
 - `cargo xtask layers` enforces it: a crate depends only on lower layers, and nothing below L3
   uses egui, eframe, winit, wgpu or rfd.

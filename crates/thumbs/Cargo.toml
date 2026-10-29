@@ -1,0 +1,20 @@
+[package]
+name = "boorucraft-thumbs"
+description = "Decodes pictures in pure Rust and keeps a thumbnail cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+boorucraft-store = { workspace = true }
+image = { workspace = true }
+jxl-oxide = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

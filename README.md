@@ -16,7 +16,8 @@ then find them with searches like `artist:foo cat -dog rating:s width:>1920 orde
   in your system's default app.
 - Rust libraries only, egui desktop UI.
 
-Status: pre-alpha; the command-line tool works, the desktop app is next. See
+Status: pre-alpha; the desktop app and the command-line tool work (grid, viewer, tag search,
+tag editing). See
 [ROADMAP.md](ROADMAP.md) and [docs/design.md](docs/design.md).
 
 ## Try it
@@ -27,7 +28,14 @@ Everything builds and runs in Podman; nothing is installed on the host.
 scripts/build-image.sh                 # once
 scripts/check.sh                       # the full gate
 scripts/dev.sh cargo run -p boorucraft-cli -- help
+
+cp -r ~/Pictures/some-folder .cache/sample   # work on a copy while BooruCraft is young
+scripts/run.sh --collection .cache/sample    # the desktop app, on your own display
+scripts/screenshot.sh .cache/shot.png --collection .cache/sample --query "cat -dog"
 ```
+
+In the app: `/` search, arrows move, `Enter` opens, `Esc` goes back, `t` edits tags, `1`/`2`/`3`
+set the rating (`0` clears it), `o` opens the file in your default app.
 
 ```text
 boorucraft-cli scan DIR                         index a folder (creates DIR/collection.json)

@@ -2,23 +2,14 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **M1.1 Desktop shell**: `ui-egui` crate and `boorucraft` app (eframe, wgpu); open and
-   remember collection folders (`~/.config/boorucraft/config.json`); a scan with progress on a
-   background thread.
-2. **M1.2 Thumbnails**: `image` crate (Rust decoders only) + `jxl-oxide`; cache at
-   `~/.cache/boorucraft/thumbs/ab/cdef….jpg`; worker pool; placeholder icons with a format label
-   for files the app can't decode.
-3. **M1.3 Grid and search bar**: virtualised grid, multi-select, the M0 query language with error
-   underline, result count.
-4. **M1.4 Viewer**: fit / 1:1 / zoom / pan, next/previous in results, GIF/WebP animation; "Open in
-   default app" (`open` crate) and "Show in file manager"; unsupported formats open externally.
-5. **M1.5 Tag editor**: per file and bulk, autocomplete from the central list, "Create tag",
-   ratings with `1`/`2`/`3`; sidecars written after each change (debounced).
-6. **M2**: metatags (`width:`, `date:`, `type:`, `tagcount:`, `path:"…"`, `order:`…), quoted
+1. **M2**: metatags (`width:`, `date:`, `type:`, `tagcount:`, `path:"…"`, `order:`…), quoted
    values, autocomplete in the search bar, tag sidebar with counts and namespace colours.
-7. **M3**: perceptual hashes (dHash, pHash), BK-tree, `dupes:` metatag, review screen.
-8. **M4**: `notify` file watching, reload on outside changes to `collection.json` / `tags.json`,
+2. **M3**: perceptual hashes (dHash, pHash), BK-tree, `dupes:` metatag, review screen.
+3. **M4**: `notify` file watching, reload on outside changes to `collection.json` / `tags.json`,
    Tags screen, Unknown tags screen, rebuild from sidecars, saved searches, slideshow.
+4. **UI polish found in M1**: Tab to complete in the tag
+   input; fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
+   for videos (via PlayCraft's Rust decoders, see Later).
 
 ## Known limitations
 
@@ -30,3 +21,10 @@ Pick from the top. Each item names its milestone.
   delete.
 - Camera raw files get no width/height (their headers describe a preview).
 - Animated GIF detection reads only the first 64 KiB.
+- After an edit the whole search index of that collection is rebuilt (fast up to tens of
+  thousands of files; incremental updates later if needed).
+- A collection can't be closed while any scan is running (scan threads report back by position).
+- `scripts/run.sh` runs the app in the dev container: "Open in default app" and "Show in folder"
+  do nothing there. Outside the container they use the system's default apps.
+- No CJK font is bundled: Japanese, Chinese and Korean text needs a system font (Noto CJK,
+  Source Han, WenQuanYi, …); the app says so on start-up when none is found.

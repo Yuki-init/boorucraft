@@ -18,6 +18,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("boorucraft-store", 1),
     ("boorucraft-xmp", 1),
     ("boorucraft-index", 2),
+    ("boorucraft-thumbs", 2),
     ("boorucraft-ui-egui", 3),
     ("boorucraft", 4),
     ("boorucraft-cli", 4),
@@ -30,13 +31,14 @@ const ANY_LAYER: &[&str] = &["xtask"];
 const UI_ONLY: &[&str] = &["egui", "eframe", "egui-wgpu", "egui-winit", "winit", "wgpu", "rfd"];
 const UI_LAYER: u8 = 3;
 
-/// Crates whose job is compiling or linking C/C++ (or finding system C libraries to link).
-/// None may appear in Cargo.lock.
-const C_BUILD_CRATES: &[&str] =
-    &["cc", "cmake", "bindgen", "pkg-config", "vcpkg", "system-deps", "cxx", "cxx-build", "autotools", "nasm-rs", "cc-version", "gcc"];
+/// Crates whose only job is building or binding C/C++. None may appear in Cargo.lock.
+/// (`cc` and `pkg-config` may: several crates list them for optional features we don't use.
+/// The build check below catches them if they ever compile or link anything.)
+const C_ONLY_CRATES: &[&str] = &["cmake", "bindgen", "vcpkg", "system-deps", "cxx", "cxx-build", "autotools", "nasm-rs"];
 
-/// `-sys` crates that are plain Rust (raw OS bindings or constants) and build no C code.
-const PURE_RUST_SYS: &[&str] = &["linux-raw-sys", "windows-sys", "dirs-sys", "redox_syscall", "libredox"];
+/// Native libraries a build script may link: `dl` is the C library's dynamic loader, used to
+/// load the window system and GPU drivers at run time.
+const ALLOWED_LINKS: &[&str] = &["dl"];
 
 fn main() -> ExitCode {
     let task = std::env::args().nth(1).unwrap_or_default();
@@ -81,13 +83,38 @@ fn locked_packages() -> Result<Vec<String>, String> {
     Ok(lock.lines().filter_map(|l| l.strip_prefix("name = ")).map(|n| n.trim_matches('"').to_string()).collect())
 }
 
+/// No C-only crate in Cargo.lock, and no build script that compiles C or links a native
+/// library (Cargo reports both as `linked_libs` of the build script).
 fn rust_only() -> Result<(), String> {
     let mut problems = Vec::new();
     for name in locked_packages()? {
-        if C_BUILD_CRATES.contains(&name.as_str()) {
-            problems.push(format!("{name} builds or links C code; find a pure-Rust alternative (run `cargo tree -i {name}` to see who pulls it in)"));
-        } else if name.ends_with("-sys") && !PURE_RUST_SYS.contains(&name.as_str()) {
-            problems.push(format!("{name} is a -sys crate; if it is pure Rust, add it to PURE_RUST_SYS in xtask with a reason, otherwise replace it"));
+        if C_ONLY_CRATES.contains(&name.as_str()) {
+            problems.push(format!("{name} exists to build or bind C code; find a pure-Rust alternative (`cargo tree -i {name}`)"));
+        }
+    }
+    eprintln!("==> cargo build --workspace --all-targets --locked --message-format=json");
+    let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "--workspace", "--all-targets", "--locked", "--message-format=json"])
+        .current_dir(root())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err("cargo build failed".into());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if msg["reason"] != "build-script-executed" {
+            continue;
+        }
+        let package = msg["package_id"].as_str().unwrap_or("?");
+        let package = package.rsplit(['/', '#']).next().unwrap_or(package);
+        for lib in msg["linked_libs"].as_array().into_iter().flatten().filter_map(|l| l.as_str()) {
+            let name = lib.rsplit('=').next().unwrap_or(lib);
+            if lib.starts_with("static=") || !ALLOWED_LINKS.contains(&name) {
+                problems.push(format!("{package}: its build script links native library `{lib}`"));
+            }
         }
     }
     report("rust-only", problems)

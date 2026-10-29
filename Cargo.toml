@@ -14,8 +14,11 @@ boorucraft-core = { path = "crates/core" }
 # Layer L1: the tag list and collections on disk, the in-memory index; XMP sidecars.
 boorucraft-store = { path = "crates/store" }
 boorucraft-xmp = { path = "crates/xmp" }
-# Layer L2: scanning folders.
+# Layer L2: scanning folders; thumbnails.
 boorucraft-index = { path = "crates/index" }
+boorucraft-thumbs = { path = "crates/thumbs" }
+# Layer L3: the desktop UI.
+boorucraft-ui-egui = { path = "crates/ui-egui" }
 
 # Rust crates only (AGENTS.md §2); `cargo xtask rust-only` checks Cargo.lock.
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +34,13 @@ md-5 = "0.11"
 imagesize = "0.15"
 kamadak-exif = "0.6"
 tempfile = "3"
+# Decoders only, all pure Rust (no AVIF: its decoder is C).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico", "qoi"] }
+jxl-oxide = { version = "0.12", features = ["image"] }
+open = "5"
+egui = { version = "0.37", default-features = false }
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "x11", "wayland"] }
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "pollster"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

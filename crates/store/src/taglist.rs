@@ -124,6 +124,16 @@ impl TagList {
         TagList { path: PathBuf::new(), data: TagListFile::default(), stamp: None, lock: None, dirty: false }
     }
 
+    /// A read-only copy, e.g. for a background scan. Saving it fails.
+    pub fn snapshot(&self) -> TagList {
+        TagList { path: self.path.clone(), data: self.data.clone(), stamp: self.stamp, lock: None, dirty: false }
+    }
+
+    /// Opened without the lock (another BooruCraft had it): changes can't be saved.
+    pub fn is_read_only(&self) -> bool {
+        self.lock.is_none()
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

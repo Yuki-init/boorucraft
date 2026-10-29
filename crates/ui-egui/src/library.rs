@@ -1,0 +1,605 @@
+//! Everything the window shows, without egui: the tag list, the open collections, background
+//! scans, searches across collections, edits and debounced saves.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::{Duration, Instant};
+
+use boorucraft_core::{Query, Rating};
+use boorucraft_index::{ScanCache, ScanReport, SidecarReport, scan, write_sidecars};
+use boorucraft_store::{Collection, FileEntry, SearchIndex, StoreError, TagList, paths, safefile};
+use serde::{Deserialize, Serialize};
+
+/// How long after the last edit collection.json and the sidecars are saved.
+pub const SAVE_DELAY: Duration = Duration::from_secs(2);
+
+/// Where the app keeps its own files: [`Dirs::system`] in the app, temporary folders in tests.
+#[derive(Debug, Clone)]
+pub struct Dirs {
+    /// `config.json` lives here.
+    pub config: PathBuf,
+    /// Scan caches and thumbnails.
+    pub cache: PathBuf,
+    /// The central tag list.
+    pub tags: PathBuf,
+}
+
+impl Dirs {
+    pub fn system() -> Dirs {
+        Dirs { config: paths::config_dir(), cache: paths::cache_dir(), tags: paths::tag_list_path() }
+    }
+}
+
+/// The app's own settings, `~/.config/boorucraft/config.json`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub collections: Vec<PathBuf>,
+    #[serde(default)]
+    pub tile_size: Option<f32>,
+}
+
+impl Config {
+    pub fn path(dirs: &Dirs) -> PathBuf {
+        dirs.config.join("config.json")
+    }
+
+    pub fn load(dirs: &Dirs) -> Config {
+        safefile::read_capped(&Self::path(dirs), 16 * 1024 * 1024).ok().flatten().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self, dirs: &Dirs) -> Result<(), String> {
+        let path = Self::path(dirs);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let mut bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        bytes.push(b'\n');
+        safefile::write_atomic(&path, &bytes, false).map(|_| ()).map_err(|e| e.to_string())
+    }
+}
+
+/// One search result: a file in one of the open collections.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Hit {
+    pub coll: usize,
+    pub hash: String,
+}
+
+pub enum CollState {
+    Ready {
+        c: Box<Collection>,
+        cache: Box<ScanCache>,
+    },
+    /// The collection is on a scan thread.
+    Scanning,
+    Failed(String),
+}
+
+pub struct OpenCollection {
+    pub root: PathBuf,
+    pub name: String,
+    pub state: CollState,
+    pub index: SearchIndex,
+    /// Set by edits; saved [`SAVE_DELAY`] later.
+    pub dirty_since: Option<Instant>,
+    pub sidecars_pending: BTreeSet<String>,
+    /// The last save failed: the changes are still in memory and are saved again later.
+    pub save_error: Option<String>,
+    pub last_report: Option<String>,
+}
+
+impl OpenCollection {
+    pub fn collection(&self) -> Option<&Collection> {
+        match &self.state {
+            CollState::Ready { c, .. } => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.collection().is_some_and(Collection::is_read_only)
+    }
+}
+
+struct ScanDone {
+    coll: usize,
+    c: Box<Collection>,
+    cache: Box<ScanCache>,
+    report: ScanReport,
+}
+
+pub struct Library {
+    pub tags: TagList,
+    pub colls: Vec<OpenCollection>,
+    pub config: Config,
+    pub dirs: Dirs,
+    /// Collections came from the command line: don't write them into config.json.
+    pub session_only: bool,
+    pub hits: Vec<Hit>,
+    pub query_error: Option<(String, std::ops::Range<usize>)>,
+    /// Messages for the user (errors and notes), newest last.
+    pub messages: Vec<(String, Instant)>,
+    scan_tx: Sender<ScanDone>,
+    scan_rx: Receiver<ScanDone>,
+    /// Called when a background job finishes, to wake the UI.
+    waker: Arc<dyn Fn() + Send + Sync>,
+}
+
+fn name_of(root: &Path) -> String {
+    root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+impl Library {
+    pub fn new(dirs: Dirs, config: Config, session_collections: Option<Vec<PathBuf>>, waker: Arc<dyn Fn() + Send + Sync>) -> Library {
+        let (scan_tx, scan_rx) = channel();
+        let mut messages = Vec::new();
+        let path = dirs.tags.clone();
+        let tags = match TagList::open(&path) {
+            Ok(t) => t,
+            Err(e @ StoreError::Locked { .. }) => {
+                messages.push((format!("{e}. Tags can't be changed in this window."), Instant::now()));
+                TagList::open_read_only(&path).unwrap_or_else(|_| TagList::in_memory())
+            }
+            Err(e) => {
+                messages.push((format!("Couldn't open the tag list: {e}"), Instant::now()));
+                TagList::in_memory()
+            }
+        };
+        let session_only = session_collections.is_some();
+        let roots = session_collections.unwrap_or_else(|| config.collections.clone());
+        let mut lib = Library { tags, colls: Vec::new(), config, dirs, session_only, hits: Vec::new(), query_error: None, messages, scan_tx, scan_rx, waker };
+        for root in roots {
+            lib.open_collection(&root, false);
+        }
+        lib
+    }
+
+    pub fn notify(&mut self, msg: impl Into<String>) {
+        self.messages.push((msg.into(), Instant::now()));
+        if self.messages.len() > 20 {
+            self.messages.remove(0);
+        }
+    }
+
+    /// Opens a collection folder and starts a scan. `remember` adds it to config.json.
+    pub fn open_collection(&mut self, root: &Path, remember: bool) {
+        if self.colls.iter().any(|c| c.root == root || root.canonicalize().ok().is_some_and(|r| r == c.root)) {
+            self.notify(format!("{} is already open", root.display()));
+            return;
+        }
+        let opened = match Collection::open(root) {
+            Err(StoreError::Locked { .. }) => {
+                self.notify(format!("{} is open in another BooruCraft; showing it read-only", root.display()));
+                Collection::open_read_only(root)
+            }
+            other => other,
+        };
+        let (state, root_path) = match opened {
+            Ok(mut c) => {
+                let changed = c.apply_tag_history(&self.tags);
+                let root = c.root().to_path_buf();
+                let cache = ScanCache::load(&self.dirs.cache, &root);
+                let mut oc = OpenCollection {
+                    root: root.clone(),
+                    name: name_of(&root),
+                    index: SearchIndex::build(&c),
+                    state: CollState::Ready { c: Box::new(c), cache: Box::new(cache) },
+                    dirty_since: None,
+                    sidecars_pending: BTreeSet::new(),
+                    save_error: None,
+                    last_report: None,
+                };
+                if !changed.is_empty() {
+                    oc.dirty_since = Some(Instant::now());
+                    oc.sidecars_pending.extend(changed);
+                }
+                self.colls.push(oc);
+                (None, root)
+            }
+            Err(e) => (Some(e.to_string()), root.to_path_buf()),
+        };
+        if let Some(err) = state {
+            self.notify(format!("Couldn't open {}: {err}", root_path.display()));
+            self.colls.push(OpenCollection {
+                root: root_path.clone(),
+                name: name_of(&root_path),
+                state: CollState::Failed(err),
+                index: SearchIndex::default(),
+                dirty_since: None,
+                sidecars_pending: BTreeSet::new(),
+                save_error: None,
+                last_report: None,
+            });
+        } else {
+            let idx = self.colls.len() - 1;
+            self.start_scan(idx);
+        }
+        if remember && !self.session_only && !self.config.collections.contains(&root_path) {
+            self.config.collections.push(root_path);
+            self.save_config();
+        }
+    }
+
+    pub fn close_collection(&mut self, idx: usize) {
+        // Scan threads report back by index, so indexes must not shift while any runs.
+        if self.is_scanning() {
+            self.notify("Wait for scanning to finish before closing a collection");
+            return;
+        }
+        self.flush(idx);
+        let oc = self.colls.remove(idx);
+        self.config.collections.retain(|p| *p != oc.root);
+        if !self.session_only {
+            self.save_config();
+        }
+        self.hits.retain(|h| h.coll != idx);
+        for h in &mut self.hits {
+            if h.coll > idx {
+                h.coll -= 1;
+            }
+        }
+    }
+
+    fn save_config(&mut self) {
+        if let Err(e) = self.config.save(&self.dirs) {
+            self.notify(format!("Couldn't save settings: {e}"));
+        }
+    }
+
+    pub fn set_tile_size(&mut self, size: f32) {
+        self.config.tile_size = Some(size);
+        if !self.session_only {
+            self.save_config();
+        }
+    }
+
+    /// Moves a collection to a scan thread.
+    pub fn start_scan(&mut self, idx: usize) {
+        self.flush(idx);
+        let Some(oc) = self.colls.get_mut(idx) else { return };
+        if oc.read_only() {
+            return;
+        }
+        let CollState::Ready { c, cache } = std::mem::replace(&mut oc.state, CollState::Scanning) else { return };
+        let tags = self.tags.snapshot();
+        let tx = self.scan_tx.clone();
+        let waker = Arc::clone(&self.waker);
+        let spawned = std::thread::Builder::new().name("scan".into()).spawn(move || {
+            let (mut c, mut cache) = (c, cache);
+            let report = scan(&mut c, &tags, &mut cache);
+            let _ = tx.send(ScanDone { coll: idx, c, cache, report });
+            waker();
+        });
+        if let Err(e) = spawned {
+            oc.state = CollState::Failed(format!("couldn't start a scan: {e}"));
+        }
+    }
+
+    pub fn is_scanning(&self) -> bool {
+        self.colls.iter().any(|c| matches!(c.state, CollState::Scanning))
+    }
+
+    /// Takes finished scans back. Returns true if anything changed.
+    pub fn poll(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(done) = self.scan_rx.try_recv() {
+            changed = true;
+            let ScanDone { coll, mut c, cache, report } = done;
+            let summary = format!("{} files: {} new, {} moved, {} edited, {} missing", report.files, report.added, report.moved, report.edited, report.missing);
+            let problems = report.errors.len() + report.sidecars.errors.len();
+            let save_err = c.save().err();
+            let _ = cache.save();
+            let name;
+            {
+                let Some(oc) = self.colls.get_mut(coll) else { continue };
+                oc.index = SearchIndex::build(&c);
+                oc.state = CollState::Ready { c, cache };
+                oc.last_report = Some(summary);
+                name = oc.name.clone();
+            }
+            if problems > 0 {
+                self.notify(format!("{name}: {problems} file(s) had problems during the scan"));
+            }
+            if let Some(e) = save_err {
+                self.notify(format!("{name}: couldn't save: {e}"));
+            }
+        }
+        changed
+    }
+
+    /// Runs a query over every ready collection; newest imported first.
+    pub fn search(&mut self, text: &str) {
+        let query = match Query::parse(text) {
+            Ok(q) => {
+                self.query_error = None;
+                q
+            }
+            Err(e) => {
+                self.query_error = Some((e.message.clone(), e.span.clone()));
+                return;
+            }
+        };
+        let mut hits: Vec<(chrono::DateTime<chrono::Utc>, Hit)> = Vec::new();
+        for (i, oc) in self.colls.iter().enumerate() {
+            let Some(c) = oc.collection() else { continue };
+            for hash in oc.index.search(&query) {
+                if let Some(e) = c.get(hash) {
+                    hits.push((e.imported, Hit { coll: i, hash: hash.to_string() }));
+                }
+            }
+        }
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.hash.cmp(&b.1.hash)));
+        self.hits = hits.into_iter().map(|(_, h)| h).collect();
+    }
+
+    pub fn entry(&self, hit: &Hit) -> Option<&FileEntry> {
+        self.colls.get(hit.coll)?.collection()?.get(&hit.hash)
+    }
+
+    /// The first existing path of a file.
+    pub fn path_of(&self, hit: &Hit) -> Option<PathBuf> {
+        let c = self.colls.get(hit.coll)?.collection()?;
+        let e = c.get(&hit.hash)?;
+        e.paths.iter().filter_map(|p| c.abs_path(p)).find(|p| p.exists()).or_else(|| e.paths.first().and_then(|p| c.abs_path(p)))
+    }
+
+    fn mark_dirty(&mut self, coll: usize, hashes: impl IntoIterator<Item = String>) {
+        if let Some(oc) = self.colls.get_mut(coll) {
+            oc.dirty_since = Some(Instant::now());
+            oc.sidecars_pending.extend(hashes);
+        }
+    }
+
+    /// Adds and removes tags on several files. Returns the number of files changed.
+    pub fn edit_tags(&mut self, hits: &[Hit], add: &[String], remove: &[String]) -> usize {
+        let add: Vec<&str> = add.iter().map(String::as_str).collect();
+        let remove: Vec<&str> = remove.iter().map(String::as_str).collect();
+        let mut changed = 0;
+        let mut errors = Vec::new();
+        let mut touched: Vec<(usize, String)> = Vec::new();
+        for hit in hits {
+            let Some(oc) = self.colls.get_mut(hit.coll) else { continue };
+            let CollState::Ready { c, .. } = &mut oc.state else { continue };
+            if c.is_read_only() {
+                errors.push(format!("{} is read-only", oc.name));
+                continue;
+            }
+            match c.edit_tags(&hit.hash, &add, &remove, &self.tags) {
+                Ok(true) => {
+                    changed += 1;
+                    touched.push((hit.coll, hit.hash.clone()));
+                }
+                Ok(false) => {}
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        self.after_edit(touched);
+        if let Some(e) = errors.into_iter().next() {
+            self.notify(e);
+        }
+        changed
+    }
+
+    /// Sets (or clears) the rating of several files.
+    pub fn set_rating(&mut self, hits: &[Hit], rating: Option<Rating>) {
+        self.edit_entries(hits, |e| {
+            let changed = e.rating != rating;
+            e.rating = rating;
+            changed
+        });
+    }
+
+    pub fn set_source(&mut self, hit: &Hit, source: Option<String>) {
+        let source = source.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        self.edit_entries(std::slice::from_ref(hit), |e| {
+            let changed = e.source != source;
+            e.source = source.clone();
+            changed
+        });
+    }
+
+    fn edit_entries(&mut self, hits: &[Hit], mut f: impl FnMut(&mut FileEntry) -> bool) {
+        let mut touched = Vec::new();
+        for hit in hits {
+            let Some(oc) = self.colls.get_mut(hit.coll) else { continue };
+            let CollState::Ready { c, .. } = &mut oc.state else { continue };
+            if c.is_read_only() {
+                continue;
+            }
+            if let Some(e) = c.get_mut(&hit.hash)
+                && f(e)
+            {
+                touched.push((hit.coll, hit.hash.clone()));
+            }
+        }
+        self.after_edit(touched);
+    }
+
+    fn after_edit(&mut self, touched: Vec<(usize, String)>) {
+        let colls: BTreeSet<usize> = touched.iter().map(|(c, _)| *c).collect();
+        for (coll, hash) in touched {
+            self.mark_dirty(coll, [hash]);
+        }
+        for coll in colls {
+            if let Some(oc) = self.colls.get_mut(coll)
+                && let CollState::Ready { c, .. } = &oc.state
+            {
+                oc.index = SearchIndex::build(c);
+            }
+        }
+    }
+
+    /// Adds a tag to the central list. Returns its normalised name.
+    pub fn create_tag(&mut self, name: &str) -> Option<String> {
+        if self.tags.is_read_only() {
+            self.notify("The tag list is open in another BooruCraft; new tags can't be created here");
+            return None;
+        }
+        match self.tags.create(name, "") {
+            Ok(t) => {
+                if let Err(e) = self.tags.save() {
+                    self.notify(format!("Couldn't save the tag list: {e}"));
+                }
+                Some(t)
+            }
+            Err(StoreError::TagExists(t)) => Some(t),
+            Err(e) => {
+                self.notify(e.to_string());
+                None
+            }
+        }
+    }
+
+    /// Saves collections whose last edit is older than [`SAVE_DELAY`]. Returns how long until the
+    /// next one is due.
+    pub fn save_due(&mut self) -> Option<Duration> {
+        let mut next: Option<Duration> = None;
+        for i in 0..self.colls.len() {
+            let Some(since) = self.colls.get(i).and_then(|c| c.dirty_since) else { continue };
+            let age = since.elapsed();
+            if age >= SAVE_DELAY {
+                self.flush(i);
+            } else {
+                let left = SAVE_DELAY.saturating_sub(age);
+                next = Some(next.map_or(left, |n| n.min(left)));
+            }
+        }
+        next
+    }
+
+    /// Saves one collection and writes its pending sidecars now.
+    pub fn flush(&mut self, idx: usize) {
+        let Some(oc) = self.colls.get_mut(idx) else { return };
+        if oc.dirty_since.is_none() && oc.save_error.is_none() {
+            return;
+        }
+        let CollState::Ready { c, cache } = &mut oc.state else { return };
+        let mut error = None;
+        // Not dirty either way: a failed save is retried after the next edit or on exit,
+        // not every frame.
+        oc.dirty_since = None;
+        match c.save() {
+            Ok(()) => {
+                oc.save_error = None;
+                let mut report = SidecarReport::default();
+                write_sidecars(c, &self.tags, oc.sidecars_pending.iter().map(String::as_str), cache, &mut report);
+                let _ = cache.save();
+                oc.sidecars_pending.clear();
+                if let Some((p, e)) = report.errors.first() {
+                    error = Some(format!("Sidecar {}: {e}", p.display()));
+                }
+            }
+            Err(e) => {
+                let msg = format!("{}: couldn't save: {e}", oc.name);
+                oc.save_error = Some(msg.clone());
+                error = Some(msg);
+            }
+        }
+        if let Some(e) = error {
+            self.notify(e);
+        }
+    }
+
+    /// Saves everything now (on exit).
+    pub fn flush_all(&mut self) {
+        for i in 0..self.colls.len() {
+            self.flush(i);
+        }
+        if self.tags.is_dirty() && !self.tags.is_read_only() {
+            let _ = self.tags.save();
+        }
+    }
+
+    /// True while edits wait for their save, or the last save failed.
+    pub fn has_unsaved(&self) -> bool {
+        self.colls.iter().any(|c| c.dirty_since.is_some() || c.save_error.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn picture(path: &Path, shade: u8) {
+        let img = image::RgbaImage::from_pixel(8, 6, image::Rgba([shade, 40, 90, 255]));
+        img.save_with_format(path, image::ImageFormat::Png).unwrap();
+    }
+
+    fn library(tmp: &Path, pics: &Path) -> Library {
+        let dirs = Dirs { config: tmp.join("cfg"), cache: tmp.join("cache"), tags: tmp.join("cfg/tags.json") };
+        let mut lib = Library::new(dirs, Config::default(), Some(vec![pics.to_path_buf()]), Arc::new(|| {}));
+        let start = Instant::now();
+        while lib.is_scanning() {
+            assert!(start.elapsed() < Duration::from_secs(20), "scan never finished");
+            lib.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lib.poll();
+        lib
+    }
+
+    #[test]
+    fn edits_are_saved_to_the_collection_and_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        picture(&pics.join("a.png"), 10);
+        picture(&pics.join("b.png"), 200);
+
+        let mut lib = library(tmp.path(), &pics);
+        lib.search("");
+        assert_eq!(lib.hits.len(), 2);
+        let all = lib.hits.clone();
+
+        assert_eq!(lib.create_tag("Blue Sky").as_deref(), Some("blue_sky"));
+        assert_eq!(lib.edit_tags(&all, &["blue_sky".into()], &[]), 2);
+        assert_eq!(lib.edit_tags(&all, &["not_listed".into()], &[]), 0, "only listed tags can be added");
+        assert!(lib.messages.iter().any(|(m, _)| m.contains("not_listed")));
+        lib.set_rating(&all[..1], Some(Rating::Safe));
+        assert!(lib.has_unsaved());
+        assert_eq!(lib.save_due().map(|d| d <= SAVE_DELAY), Some(true), "saves wait for the delay");
+
+        lib.flush_all();
+        assert!(!lib.has_unsaved());
+        let json = std::fs::read_to_string(pics.join("collection.json")).unwrap();
+        assert!(json.contains("blue_sky"));
+        for name in ["a.png.xmp", "b.png.xmp"] {
+            let xmp = std::fs::read_to_string(pics.join(name)).unwrap();
+            assert!(xmp.contains("blue_sky"), "{name}");
+        }
+        assert!(!tmp.path().join("cfg/config.json").exists(), "session collections aren't remembered");
+
+        lib.search("blue_sky rating:s");
+        assert_eq!(lib.hits.len(), 1);
+        lib.search("blue_sky -rating:s");
+        assert_eq!(lib.hits.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_changes_and_the_other_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        picture(&pics.join("a.png"), 10);
+
+        let mut lib = library(tmp.path(), &pics);
+        lib.search("");
+        let all = lib.hits.clone();
+        lib.create_tag("cat");
+
+        // Another program rewrites collection.json behind BooruCraft's back.
+        let theirs = "{\"edited\": \"elsewhere\"}\n";
+        std::fs::write(pics.join("collection.json"), theirs).unwrap();
+        lib.edit_tags(&all, &["cat".into()], &[]);
+        lib.flush_all();
+
+        assert_eq!(std::fs::read_to_string(pics.join("collection.json")).unwrap(), theirs, "never saved over");
+        assert!(lib.has_unsaved(), "the failure stays visible");
+        assert!(lib.colls[0].save_error.is_some());
+        assert!(lib.entry(&all[0]).unwrap().tags.contains("cat"), "the edit is kept in memory");
+        assert!(lib.save_due().is_none(), "no retry every frame");
+    }
+}

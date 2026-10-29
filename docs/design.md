@@ -24,22 +24,28 @@ every file has tags, and you find files by searching tags and other properties.
 ## Rust-only rule (D2)
 
 - Every dependency is a Rust crate. No C or C++ is compiled into the binary: no `-sys` crates that
-  build bundled C code, no `cc`/`cmake` build steps. `scripts/check.sh` fails if `cc`, `cmake` or
-  a `*-sys` crate with bundled sources shows up in `cargo tree`.
+  build bundled C code, no `cc`/`cmake` build steps.
 - Allowed: talking to libraries the operating system already provides, the way every desktop app
   does (graphics drivers through wgpu, X11/Wayland, the desktop portal). Nothing from these is
-  bundled.
+  bundled; they are opened at run time (`dlopen`).
 - Crates are configured to stay pure: `image` with only its Rust decoders, `rfd` with the
-  `xdg-portal` backend (not GTK).
-- `cargo xtask rust-only` fails if Cargo.lock contains a C build or link crate (`cc`, `cmake`,
-  `bindgen`, `pkg-config`…) or a `-sys` crate not on its short list of pure-Rust ones. This is
-  why the hash is SHA-256 (`sha2`): the `blake3` crate always pulls in `cc`, even in pure mode.
+  `xdg-portal` backend (not GTK), `eframe` with wgpu and without its bundled fonts.
+- `cargo xtask rust-only` checks two things:
+  1. Cargo.lock has no crate whose only job is building or finding C code (`cmake`, `bindgen`,
+     `vcpkg`, `system-deps`, `cxx`, …). `cc` and `pkg-config` are allowed in the lock file
+     because the windowing crates list them as optional build steps that are never switched on
+     here.
+  2. It builds the workspace and reads what every build script told the compiler to link. The
+     only native library allowed is `dl` (x11-dl uses it to open X11 at run time); anything
+     else, or any static library, fails the check.
+- This is why the hash is SHA-256 (`sha2`): the `blake3` crate always compiles C with `cc`.
 - Licences: permissive only (checked by `cargo deny`). This is why config and cache folders are
   found by our own code instead of the `dirs` crate, which pulls in an MPL-2.0 dependency.
 
 Crates: `serde` + `serde_json`, `sha2`, `md-5`, `quick-xml`, `roaring`, `walkdir`, `rayon`,
-`imagesize`, `kamadak-exif`, `chrono`, `thiserror` (in use since M0); planned: `eframe`/`egui`, `image`
-(JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI), `jxl-oxide`, `notify`, `open`, `trash`, `rfd`.
+`imagesize`, `kamadak-exif`, `chrono`, `thiserror` (since M0); `eframe`/`egui` (wgpu), `image`
+(JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI), `jxl-oxide`, `open`, `rfd` (since M1); planned:
+`notify`, `trash`.
 
 ## Workspace layout
 
@@ -48,15 +54,16 @@ crates/
   core/      data types, query parser and AST (no IO, heavily unit-tested)
   store/     central tag list, collection.json format, load/save, locking, in-memory indexes, search
   xmp/       reading and updating XMP sidecars without losing other apps' data
-  index/     folder scanning, hashing, metadata, thumbnails, file watching
-  dedup/     perceptual hashes, BK-tree, duplicate groups
+  index/     folder scanning, hashing, metadata, sidecar sync
+  thumbs/    decoding pictures (Rust decoders only), thumbnail cache
+  dedup/     perceptual hashes, BK-tree, duplicate groups (M3)
   ui-egui/   search bar, grid, viewer, tag editor, duplicates view
 apps/
   boorucraft/      the desktop app
   boorucraft-cli/  headless scan / search / tag / dupes, for tests and scripting
 ```
 
-Dependencies only point downwards: `core` <- `store`, `xmp`, `dedup` <- `index` <- `ui-egui` <- apps.
+Dependencies only point downwards: `core` <- `store`, `xmp` <- `index`, `thumbs`, `dedup` <- `ui-egui` <- apps.
 
 ## Central tag list (D4b)
 
