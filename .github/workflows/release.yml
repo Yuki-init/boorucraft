@@ -35,11 +35,10 @@ jobs:
       # BooruCraft embeds its own fonts (assets/fonts), not craft-fonts.
       craft-fonts-ref: ""
       version: ${{ inputs.version }}
-      # No web build: the app reads folders on disk. No headless server.
+      # Not built: web (the app reads folders on disk), a headless server, FreeBSD.
       has-web: false
       has-server: false
-      # The suite's FreeBSD aarch64 cross build doesn't set up yet (no cmake package there).
-      freebsd-architectures: '["x86_64"]'
+      has-freebsd: false
     secrets:
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}

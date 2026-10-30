@@ -4,7 +4,8 @@
 #   - no macOS job: the suite builds it on a paid runner; scripts/release-macos.sh builds the
 #     DMG on a Mac and uploads it to the draft release instead;
 #   - releases use the stable toolchain (RUSTUP_TOOLCHAIN) rather than rust-toolchain.toml's pin;
-#   - unsigned Windows builds on the release branch warn instead of failing.
+#   - unsigned Windows builds on the release branch warn instead of failing;
+#   - no 32-bit Windows (x86) build.
 # To take suite updates: diff the upstream file against this one and carry the changes over.
 
 name: "Release"
@@ -209,7 +210,7 @@ jobs:
       matrix:
         include:
           - { arch: x64, target: x86_64-pc-windows-msvc }
-          - { arch: x86, target: i686-pc-windows-msvc }
+          # BooruCraft: no 32-bit x86 build.
           - { arch: arm64, target: aarch64-pc-windows-msvc }
     env:
       CARGO_TERM_COLOR: always
