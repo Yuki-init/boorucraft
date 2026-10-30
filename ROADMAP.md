@@ -121,3 +121,6 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   capture a running scan.
 - 2026-10-30 — P2: the viewer and slideshow decode the next picture (in the direction of travel,
   wrapping in a looping slideshow) once the current one has loaded, so stepping on is instant.
+- 2026-10-30 — P3: video thumbnails (a frame near the start, with a play badge) and video sizes
+  through PlayCraft's pure-Rust MP4/Matroska demuxer and H.264 decoder (`../playcraft`, a path
+  dependency). Fixed MP4/MOV files being stored as HEIC pictures; scans correct old entries.

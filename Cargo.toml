@@ -39,6 +39,11 @@ tempfile = "3"
 # Decoders only, all pure Rust (no AVIF: its decoder is C).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico", "qoi"] }
 jxl-oxide = { version = "0.12", features = ["image"] }
+# Video thumbnails: PlayCraft's pure-Rust MP4/Matroska demuxer and H.264 decoder, from the
+# PlayCraft checkout next to this one (mounted read-only at /playcraft in the dev container).
+playcraft-media = { path = "../playcraft/crates/media" }
+# Tests only: writing small Matroska videos (the same revision PlayCraft uses).
+craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "f0ad6c1e1d297908915f4be315b0fcfc9be7b5d4", default-features = false, features = ["matroska", "bitstream"] }
 open = "5"
 trash = { version = "5", default-features = false }
 # File watching: inotify on Linux (FFI declarations only, no C is compiled).
@@ -59,6 +64,10 @@ type_complexity = "allow"
 [profile.dev.package."*"]
 opt-level = 2
 debug = false
+
+# The H.264 decoder is far too slow for thumbnails below opt-level 3.
+[profile.dev.package.playcraft-h264]
+opt-level = 3
 
 [profile.dev]
 opt-level = 1

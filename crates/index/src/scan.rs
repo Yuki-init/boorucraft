@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use boorucraft_store::{Collection, FileEntry, TagList};
+use boorucraft_store::{Collection, FileEntry, Kind, TagList};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
@@ -86,6 +86,12 @@ struct Found {
     ext: String,
 }
 
+/// Before videos were probed by extension, MP4 and MOV files were stored as HEIC pictures; a
+/// scan probes them again to put that right.
+fn misdetected_video(e: &FileEntry, ext: &str) -> bool {
+    VIDEO_EXTENSIONS.contains(&ext) && e.kind != Kind::Video
+}
+
 pub(crate) fn extensions(c: &Collection) -> BTreeSet<String> {
     let custom = &c.settings().extensions;
     if custom.is_empty() {
@@ -156,7 +162,7 @@ pub fn scan_with_progress(c: &mut Collection, tags: &TagList, cache: &mut ScanCa
     let mut to_hash: Vec<&Found> = Vec::new();
     for f in &found {
         match cache.hash_if_unchanged(&f.rel, f.seen) {
-            Some(h) if c.get(h).is_some() => {
+            Some(h) if c.get(h).is_some_and(|e| !misdetected_video(e, &f.ext)) => {
                 hash_of.insert(f.rel.clone(), h.to_string());
             }
             _ => to_hash.push(f),
@@ -181,6 +187,16 @@ pub fn scan_with_progress(c: &mut Collection, tags: &TagList, cache: &mut ScanCa
             Ok((f, hashes, meta)) => {
                 cache.set_file(&f.rel, f.seen, &hashes.sha256);
                 hash_of.insert(f.rel.clone(), hashes.sha256.clone());
+                if let Some(e) = c.get(&hashes.sha256)
+                    && misdetected_video(e, &f.ext)
+                    && meta.kind == Kind::Video
+                    && let Some(e) = c.get_mut(&hashes.sha256)
+                {
+                    e.kind = meta.kind;
+                    e.format = meta.format.clone();
+                    e.width = meta.width;
+                    e.height = meta.height;
+                }
                 if c.get(&hashes.sha256).is_none() && !new_entries.contains_key(&hashes.sha256) {
                     let mut e = FileEntry::new(hashes.md5, meta.kind, meta.format, f.seen.size);
                     e.width = meta.width;

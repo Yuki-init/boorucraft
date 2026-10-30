@@ -241,6 +241,7 @@ dependencies = [
  "kamadak-exif",
  "md-5",
  "notify",
+ "playcraft-media",
  "rayon",
  "serde",
  "serde_json",
@@ -270,8 +271,10 @@ version = "0.1.0"
 dependencies = [
  "boorucraft-dedup",
  "boorucraft-store",
+ "craft-media",
  "image",
  "jxl-oxide",
+ "playcraft-media",
  "tempfile",
  "thiserror 2.0.21",
 ]
@@ -537,6 +540,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "craft-media"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=f0ad6c1e1d297908915f4be315b0fcfc9be7b5d4#f0ad6c1e1d297908915f4be315b0fcfc9be7b5d4"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2377,6 +2388,38 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "playcraft-aac"
+version = "0.1.0"
+dependencies = [
+ "craft-media",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "playcraft-h264"
+version = "0.1.0"
+dependencies = [
+ "craft-media",
+ "rayon",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "playcraft-media"
+version = "0.1.0"
+dependencies = [
+ "craft-media",
+ "playcraft-aac",
+ "playcraft-h264",
+ "playcraft-opus",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "playcraft-opus"
+version = "0.1.0"
 
 [[package]]
 name = "png"

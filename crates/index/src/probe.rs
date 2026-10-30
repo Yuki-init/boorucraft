@@ -85,6 +85,11 @@ fn fallback(extension: &str) -> Meta {
 }
 
 fn probe_inner(path: &Path, header: &[u8], extension: &str) -> Meta {
+    // Before the picture check: MP4 and MOV share HEIC's container, so the header alone would
+    // call them HEIC pictures.
+    if VIDEO_EXTENSIONS.contains(&extension) {
+        return probe_video(path, extension);
+    }
     let Ok(image_type) = imagesize::image_type(header) else { return fallback(extension) };
     let mut meta = Meta { kind: Kind::Image, format: format_name(&image_type), ..Meta::default() };
     if RAW_EXTENSIONS.contains(&extension) {
@@ -100,6 +105,28 @@ fn probe_inner(path: &Path, header: &[u8], extension: &str) -> Meta {
     }
     meta.animated = is_animated(&meta.format, header);
     meta.taken = exif_taken(path);
+    meta
+}
+
+/// A video's format from its extension, and its size from the video track when PlayCraft can
+/// read the container (MP4/MOV, Matroska/WebM; only headers and sample tables are read).
+fn probe_video(path: &Path, extension: &str) -> Meta {
+    let mut meta = fallback(extension);
+    if !matches!(meta.format.as_str(), "mp4" | "mov" | "mkv" | "webm") {
+        return meta;
+    }
+    let Ok(media) = playcraft_media::Media::open(path) else { return meta };
+    // Any video track will do for the size, even one PlayCraft can't decode yet.
+    let tracks = media.tracks();
+    let video =
+        media.default_video().and_then(|i| tracks.iter().find(|t| t.index == i)).or_else(|| tracks.iter().find(|t| t.kind == playcraft_media::Kind::Video));
+    if let Some(t) = video
+        && t.width > 0
+        && t.height > 0
+    {
+        meta.width = Some(t.width);
+        meta.height = Some(t.height);
+    }
     meta
 }
 
@@ -183,6 +210,16 @@ mod tests {
         assert!(png_has_actl(&animated));
         let hostile = [png, vec![0xff, 0xff, 0xff, 0xff], b"zzzz".to_vec()].concat();
         assert!(!png_has_actl(&hostile));
+    }
+
+    #[test]
+    fn mp4_and_mov_are_videos_not_heic() {
+        let ftyp = b"\0\0\0\x18ftypisom\0\0\x02\0isomiso2\0\0\0\x08free";
+        assert_eq!(probe(Path::new("/nonexistent"), ftyp, "heic").format, "heic", "the header alone says HEIC");
+        for ext in ["mp4", "mov"] {
+            let m = probe(Path::new("/nonexistent"), ftyp, ext);
+            assert_eq!((m.kind, m.format.as_str()), (Kind::Video, ext));
+        }
     }
 
     #[test]

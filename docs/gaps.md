@@ -2,8 +2,7 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **UI polish**: thumbnails for videos (via PlayCraft's Rust decoders, see Later).
-2. **Later** (ROADMAP): tag aliases and implications; importing tags from boorus by MD5; a local
+1. **Later** (ROADMAP): tag aliases and implications; importing tags from boorus by MD5; a local
    auto-tagger.
 
 ## Known limitations

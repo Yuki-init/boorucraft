@@ -334,3 +334,25 @@ fn scan_progress_counts_found_and_hashed_files() {
     let r = scan_with_progress(&mut c, &tags, &mut cache, &p);
     assert_eq!(p.get(), ScanStage::Hashing(1, 1), "{:?}", r.errors);
 }
+
+#[test]
+fn videos_once_stored_as_heic_are_put_right() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "clip.mp4", b"\0\0\0\x18ftypisom\0\0\x02\0isomiso2\0\0\0\x08free");
+    let tags = tag_list();
+    let mut cache = ScanCache::in_memory();
+    let mut c = Collection::open(root).unwrap();
+    scan(&mut c, &tags, &mut cache);
+    let h = hash_at(&c, "clip.mp4");
+    assert_eq!(c.get(&h).unwrap().kind, Kind::Video);
+    // What older versions stored.
+    let e = c.get_mut(&h).unwrap();
+    e.kind = Kind::Image;
+    e.format = "heic".into();
+    let r = scan(&mut c, &tags, &mut cache);
+    assert_eq!(r.hashed, 1, "probed again although unchanged");
+    let e = c.get(&h).unwrap();
+    assert_eq!((e.kind, e.format.as_str()), (Kind::Video, "mp4"));
+    assert_eq!(scan(&mut c, &tags, &mut cache).hashed, 0, "and only once");
+}

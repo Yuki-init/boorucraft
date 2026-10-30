@@ -1623,13 +1623,16 @@ fn draw_tile(ui: &mut egui::Ui, lib: &Library, thumbs: &mut Thumbnails, hit: &Hi
     painter.rect_filled(rect, radius, Color32::from_gray(32));
     let Some(entry) = lib.entry(hit) else { return resp };
     let inner = rect.shrink(4.0);
-    if boorucraft_thumbs::can_decode(&entry.format) && !entry.missing {
+    if boorucraft_thumbs::can_thumbnail(&entry.format) && !entry.missing {
         match thumbs.get(&hit.hash, lib.path_of(hit), &entry.format) {
             Thumb::Ready(tex) => {
                 let [w, h] = tex.size();
                 let scale = (inner.width() / w.max(1) as f32).min(inner.height() / h.max(1) as f32);
                 let r = Rect::from_center_size(inner.center(), vec2(w as f32, h as f32) * scale);
                 painter.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                if is_video(&entry.format) {
+                    play_badge(&painter, r);
+                }
             }
             Thumb::Loading => {
                 painter.rect_filled(inner, radius, Color32::from_gray(38));
@@ -1708,6 +1711,16 @@ pub fn is_video(format: &str) -> bool {
 
 /// A code-drawn stand-in for files BooruCraft can't show: a play symbol for videos, a page for
 /// anything else, and the format name.
+/// A small play mark in the corner of a video's thumbnail.
+fn play_badge(painter: &egui::Painter, pic: Rect) {
+    let s = (pic.width().min(pic.height()) * 0.12).clamp(9.0, 18.0);
+    let c = pic.left_bottom() + vec2(s + 5.0, -s - 5.0);
+    painter.circle_filled(c, s, Color32::from_black_alpha(160));
+    let t = s * 0.45;
+    let pts = vec![c + vec2(-t * 0.6, -t), c + vec2(t, 0.0), c + vec2(-t * 0.6, t)];
+    painter.add(egui::Shape::convex_polygon(pts, Color32::WHITE, Stroke::NONE));
+}
+
 pub(crate) fn draw_placeholder(painter: &egui::Painter, rect: Rect, format: &str, radius: f32) {
     painter.rect_filled(rect, CornerRadius::same(radius as u8), Color32::from_gray(44));
     let c = rect.center() - vec2(0.0, rect.height() * 0.08);

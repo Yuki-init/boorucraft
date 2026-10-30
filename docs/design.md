@@ -278,10 +278,10 @@ bmp, tiff, jxl, avif, heic, mp4, webm, mkv, mov…). The list is configurable pe
 | | Decoded by the app | Opened externally |
 |---|---|---|
 | Formats | JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI, JPEG XL | AVIF, HEIC/HEIF, videos (MP4, WebM, MKV, MOV…), RAW photos, anything else |
-| Thumbnail | yes | format icon with a label (e.g. "MP4", "HEIC") |
+| Thumbnail | yes | format icon with a label (e.g. "HEIC"); H.264 videos in MP4/MOV/MKV/WebM show a frame from near the start (10% in, at most 3 s) with a play badge |
 | In-app viewer | yes (zoom, pan, animation) | the viewer shows the format icon and an "Open in default app" button; Enter / double-click opens it directly |
 | Tags, rating, search | yes | yes |
-| Dimensions | yes | from headers where `imagesize` supports it (AVIF, HEIC); otherwise unknown |
+| Dimensions | yes | from headers where `imagesize` supports it (AVIF, HEIC); videos in MP4/MOV/MKV/WebM from the video track, whatever its codec; otherwise unknown |
 | Exact duplicates | yes | yes (hash) |
 | Near duplicates | yes | no (needs decoded pixels) |
 
@@ -289,8 +289,13 @@ Opening externally uses the `open` crate, which hands the file to the desktop's 
 (`xdg-open` on Linux). Every file, decodable or not, also has "Open in default app" and
 "Show in file manager" actions.
 
-Later option: video thumbnails and dimensions via PlayCraft's pure-Rust H.264 decoder and
-container crates. Playback would still go to the system player.
+Videos go through PlayCraft's pure-Rust crates (`playcraft-media`: MP4/MOV and Matroska
+demuxing, H.264 decoding), taken as a path dependency from the PlayCraft checkout next to this
+one (`../playcraft`, mounted read-only at `/playcraft` in the dev container). Other codecs get
+thumbnails as PlayCraft learns them. Playback still goes to the system player, and videos are
+left out of near-duplicate search. Video files are recognised by extension before their header
+is read: MP4 and MOV share HEIC's container and were once stored as HEIC pictures; a scan
+probes such entries again and corrects them.
 
 ## Search syntax (D8)
 
@@ -319,7 +324,7 @@ container crates. Playback would still go to the system player.
 | `order:date` `order:-date` `order:filesize` `order:name` `order:random` | sort order, one per search |
 
 Values with spaces go in double quotes. Calendar dates are in UTC, the same way EXIF times are
-stored. Files without a value (videos have no width) never match a numeric filter and sort last.
+stored. Files without a value (e.g. videos PlayCraft can't read) never match a numeric filter and sort last.
 
 `order:` keys: `imported` (the default), `date`, `filesize`, `width`, `height`, `mpixels`,
 `ratio`, `tagcount`, `name`, `path`, `random`. Without a sign they sort largest or newest first,

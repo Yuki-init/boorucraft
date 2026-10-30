@@ -1,8 +1,9 @@
 //! Decoding pictures in pure Rust, and the thumbnail cache.
 //!
 //! Decodable formats: JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI (`image` crate) and JPEG XL
-//! (`jxl-oxide`). Anything else (AVIF, HEIC, raw photos, videos) gets a placeholder in the UI and
-//! opens in the system's default app.
+//! (`jxl-oxide`). Videos in MP4/MOV and Matroska/WebM with H.264 get a thumbnail from a frame
+//! near the start (PlayCraft's decoders) but play in the default app. Anything else (AVIF, HEIC,
+//! raw photos, other video codecs) gets a placeholder in the UI and opens in the default app.
 //!
 //! Thumbnails live in `<cache>/thumbs/ab/<hash>.jpg` (`.png` when the picture has transparency),
 //! at most [`THUMB_SIZE`] pixels on the long side. Pictures are untrusted: sizes and allocations
@@ -49,6 +50,47 @@ pub fn can_decode(format: &str) -> bool {
     matches!(format, "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "ico" | "qoi" | "jxl")
 }
 
+/// Video formats [`decode`] can take a frame from (if the video is H.264).
+pub const VIDEO_FORMATS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
+
+/// Whether BooruCraft can make a thumbnail for this format: the pictures it decodes, and videos.
+pub fn can_thumbnail(format: &str) -> bool {
+    can_decode(format) || VIDEO_FORMATS.contains(&format)
+}
+
+/// Where in a video its thumbnail frame comes from: a little way in, past fades from black,
+/// but not far, so little has to be decoded.
+fn thumbnail_time(duration: f64) -> f64 {
+    if duration.is_finite() && duration > 0.0 { (duration * 0.1).min(3.0) } else { 0.0 }
+}
+
+/// A frame from near the start of a video.
+fn video_frame(path: &Path) -> Result<DynamicImage, ThumbError> {
+    let err = |e: playcraft_media::Error| ThumbError::Decode(path.to_path_buf(), e.to_string());
+    let media = playcraft_media::Media::open(path).map_err(err)?;
+    let track = media.default_video().ok_or_else(|| ThumbError::Decode(path.to_path_buf(), "no video track".into()))?;
+    let mut decoder = media.video(track).map_err(err)?;
+    let t = thumbnail_time(media.duration_secs());
+    if t > 0.0 {
+        decoder.seek(t).map_err(err)?;
+    }
+    let frame = match decoder.next_frame().map_err(err)? {
+        Some(f) => f,
+        // Seeked past the last frame (a wrong duration): take the first one.
+        None if t > 0.0 => {
+            decoder.seek(0.0).map_err(err)?;
+            decoder.next_frame().map_err(err)?.ok_or_else(|| ThumbError::Decode(path.to_path_buf(), "no frames".into()))?
+        }
+        None => return Err(ThumbError::Decode(path.to_path_buf(), "no frames".into())),
+    };
+    if frame.width == 0 || frame.height == 0 || frame.width > MAX_SIDE || frame.height > MAX_SIDE {
+        return Err(ThumbError::Decode(path.to_path_buf(), format!("bad frame size {}×{}", frame.width, frame.height)));
+    }
+    RgbaImage::from_raw(frame.width, frame.height, frame.to_rgba8())
+        .map(DynamicImage::ImageRgba8)
+        .ok_or_else(|| ThumbError::Decode(path.to_path_buf(), "frame doesn't match its size".into()))
+}
+
 fn limits() -> Limits {
     let mut l = Limits::default();
     l.max_image_width = Some(MAX_SIDE);
@@ -76,8 +118,11 @@ fn guarded<T>(path: &Path, f: impl FnOnce() -> Result<T, ThumbError>) -> Result<
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| Err(ThumbError::Crashed(path.to_path_buf())))
 }
 
-/// Decodes the first frame of a picture.
+/// Decodes the first frame of a picture, or a frame near the start of a video.
 pub fn decode(path: &Path, format: &str) -> Result<DynamicImage, ThumbError> {
+    if VIDEO_FORMATS.contains(&format) {
+        return guarded(path, || video_frame(path));
+    }
     guarded(path, || decode_inner(path, format))
 }
 
@@ -302,6 +347,120 @@ mod tests {
         let clear = |c: u8| RgbaImage::from_pixel(8, 8, image::Rgba([c, c, c, 0]));
         assert_eq!(perceptual(&clear(0)), perceptual(&clear(255)));
         assert_eq!(perceptual(&RgbaImage::new(0, 0)), None);
+    }
+
+    /// A Matroska file with one H.264 frame of `mbs_w`×`mbs_h` macroblocks, each sent as raw
+    /// samples (I_PCM) so the decoded picture is known exactly: luma `luma(mb)`, grey chroma.
+    fn h264_mkv(path: &Path, mbs_w: u32, mbs_h: u32, luma: impl Fn(u32) -> u8) {
+        use craft_media::bitstream::{BitWriter, escape_rbsp};
+        use craft_media::matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec};
+        let nal = |header: u8, w: BitWriter| {
+            let mut v = vec![header];
+            v.extend(escape_rbsp(&w.finish()));
+            v
+        };
+        let mut w = BitWriter::new();
+        w.write_bits(66, 8); // Baseline
+        w.write_bits(0, 8);
+        w.write_bits(30, 8);
+        w.write_ue(0); // sps id
+        w.write_ue(0); // log2_max_frame_num - 4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb - 4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(false);
+        w.write_ue(mbs_w - 1);
+        w.write_ue(mbs_h - 1);
+        w.write_bit(true); // frame_mbs_only
+        w.write_bit(true); // direct_8x8_inference
+        w.write_bit(false); // cropping
+        w.write_bit(false); // vui
+        w.rbsp_trailing();
+        let sps = nal(0x67, w);
+        let mut w = BitWriter::new();
+        w.write_ue(0); // pps id
+        w.write_ue(0); // sps id
+        w.write_bit(false); // CAVLC
+        w.write_bit(false);
+        w.write_ue(0); // slice groups
+        w.write_ue(0);
+        w.write_ue(0);
+        w.write_bit(false);
+        w.write_bits(0, 2);
+        w.write_se(0);
+        w.write_se(0);
+        w.write_se(0);
+        w.write_bit(false); // deblocking_filter_control_present
+        w.write_bit(false);
+        w.write_bit(false);
+        w.rbsp_trailing();
+        let pps = nal(0x68, w);
+        let mut w = BitWriter::new();
+        w.write_ue(0); // first_mb_in_slice
+        w.write_ue(7); // I slice
+        w.write_ue(0); // pps id
+        w.write_bits(0, 4); // frame_num
+        w.write_ue(0); // idr_pic_id
+        w.write_bits(0, 4); // pic_order_cnt_lsb
+        w.write_bit(false); // no_output_of_prior_pics
+        w.write_bit(false); // long_term_reference
+        w.write_se(0); // slice_qp_delta
+        for mb in 0..mbs_w * mbs_h {
+            w.write_ue(25); // I_PCM
+            w.align_zero();
+            w.write_bytes(&[luma(mb); 256]);
+            w.write_bytes(&[128; 128]);
+        }
+        w.rbsp_trailing();
+        let slice = nal(0x65, w);
+        let mut avcc = vec![1, 66, 0, 30, 0xff, 0xe1];
+        avcc.extend((sps.len() as u16).to_be_bytes());
+        avcc.extend(&sps);
+        avcc.push(1);
+        avcc.extend((pps.len() as u16).to_be_bytes());
+        avcc.extend(&pps);
+        let mut sample = (slice.len() as u32).to_be_bytes().to_vec();
+        sample.extend(&slice);
+        let mut track = TrackSpec::new(TrackKind::Video, "V_MPEG4/ISO/AVC");
+        track.codec_private = avcc;
+        track.video_size = Some((mbs_w * 16, mbs_h * 16));
+        let file = std::fs::File::create(path).unwrap();
+        let mut mkv = MkvWriter::new(file, vec![track], MuxOptions::default()).unwrap();
+        mkv.write_frame(0, 0, true, &sample, Some(1_000_000_000)).unwrap();
+        mkv.finish().unwrap();
+    }
+
+    #[test]
+    fn videos_get_a_thumbnail_from_a_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("clip.mkv");
+        // 3×2 macroblocks; only the top-left one is white.
+        h264_mkv(&src, 3, 2, |mb| if mb == 0 { 235 } else { 16 });
+        let img = decode(&src, "mkv").unwrap().into_rgba8();
+        assert_eq!(img.dimensions(), (48, 32));
+        assert_eq!(img.get_pixel(2, 2).0, [255, 255, 255, 255], "top-left: white");
+        assert_eq!(img.get_pixel(40, 25).0, [0, 0, 0, 255], "elsewhere: black");
+        let cache = ThumbCache::new(&dir.path().join("cache"));
+        assert_eq!(cache.get_or_make(&"ef".repeat(32), &src, "mkv").unwrap().dimensions(), (48, 32));
+        assert!(can_thumbnail("mkv") && can_thumbnail("mp4") && can_thumbnail("png") && !can_thumbnail("avi"));
+        assert!(!can_decode("mkv"), "the viewer still opens videos in the default app");
+
+        // Damaged or empty videos are errors, not crashes.
+        let bad = dir.path().join("bad.mp4");
+        std::fs::write(&bad, b"\0\0\0\x18ftypisom nonsense").unwrap();
+        assert!(matches!(decode(&bad, "mp4"), Err(ThumbError::Decode(..))));
+        let mut cut = std::fs::read(&src).unwrap();
+        cut.truncate(cut.len() / 2);
+        std::fs::write(&bad, &cut).unwrap();
+        assert!(matches!(decode(&bad, "mkv"), Err(ThumbError::Decode(..) | ThumbError::Crashed(..))));
+    }
+
+    #[test]
+    fn thumbnail_time_stays_near_the_start() {
+        assert_eq!(thumbnail_time(0.0), 0.0);
+        assert_eq!(thumbnail_time(f64::NAN), 0.0);
+        assert_eq!(thumbnail_time(10.0), 1.0);
+        assert_eq!(thumbnail_time(3600.0), 3.0);
     }
 
     #[test]
