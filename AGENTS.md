@@ -63,9 +63,11 @@ People trust an organiser with their only copy of their pictures. **This outrank
 
 ## 5. Quality gates
 
-Before every commit: `scripts/check.sh`, which runs in Podman: `cargo xtask ci` (fmt, clippy
-`-D warnings`, tests, layers, rust-only) and `cargo deny`. Commit one landed task at a time with
-its task id (`M1.2: thumbnail grid`).
+The gate is `cargo xtask ci`: fmt, clippy `-D warnings`, tests, layers, rust-only and `cargo deny`.
+GitHub Actions runs it on every push to `main` and every pull request, through the Craft suite's
+shared gate workflow (`.github/workflows/ci.yml`). Run it before every commit too: with a Rust
+toolchain, `cargo xtask ci`; without one, `scripts/check.sh` runs the same thing in Podman.
+Commit one landed task at a time with its task id (`M1.2: thumbnail grid`).
 
 ## 6. Progress docs
 

@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Rust / Cargo dependencies, in one grouped PR (git dependencies stay pinned by hand: bump
+  # FilmCraft and craft-libs together with the other Craft apps).
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-dependencies:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci(deps)"

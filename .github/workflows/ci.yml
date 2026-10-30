@@ -1,0 +1,32 @@
+name: CI
+
+# Quality gates for every push to main and every pull request (`cargo xtask ci`), through the
+# Craft suite's shared gate workflow in craft-common-actions, as the Craft apps run it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a PR branch cancels its older run; every push to main runs to the end.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    # Tracks @main so suite-wide CI fixes reach this app without a PR here, as in the Craft apps.
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      # Fonts are bundled in assets/ and no web build exists, so no craft-fonts and no wasm target.
+      craft-fonts-ref: ""
+      targets: ""
+      # `cargo xtask ci` ends with `cargo deny`.
+      tools: cargo-deny@0.20.2
+      timeout-minutes: 60
+      # Window-system libraries egui/winit load at run time (nothing is compiled against them).
+      packages: >-
+        libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev

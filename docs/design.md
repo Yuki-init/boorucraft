@@ -19,7 +19,7 @@ every file has tags, and you find files by searching tags and other properties.
 | D8 | Booru search syntax, parsed by our own parser | Familiar to booru users |
 | D9 | Near-duplicate detection with 64-bit perceptual hashes and Hamming distance | Cheap to compute and store; finds resizes and re-encodes |
 | D10 | Formats the app can't decode itself are still indexed, tagged and searched, but open in the system's default app | Videos, AVIF, HEIC etc. stay part of the collection without C decoders |
-| D11 | Build and test only in Podman | Same habits as PlayCraft |
+| D11 | CI on GitHub Actions through the Craft suite's shared gate (`cargo xtask ci`); locally the same gate in Podman | The Craft apps' CI; nothing installed on the host |
 
 ## Rust-only rule (D2)
 

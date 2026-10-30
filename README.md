@@ -25,11 +25,18 @@ Status: pre-alpha; the desktop app and the command-line tool work. See
 
 ## Try it
 
-Everything builds and runs in Podman; nothing is installed on the host.
+With a Rust toolchain (the version in `rust-toolchain.toml` is picked up by rustup):
+
+```sh
+cargo xtask ci                         # the gate CI runs: fmt, clippy, tests, layering, licences
+cargo run -p boorucraft -- --collection some-copy-of-a-folder
+```
+
+Or without installing anything, in Podman:
 
 ```sh
 scripts/build-image.sh                 # once
-scripts/check.sh                       # the full gate
+scripts/check.sh                       # the same gate
 scripts/dev.sh cargo run -p boorucraft-cli -- help
 
 cp -r ~/Pictures/some-folder .cache/sample   # work on a copy while BooruCraft is young

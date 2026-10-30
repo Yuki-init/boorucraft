@@ -138,3 +138,7 @@ aliases and implications, watches folders for outside changes, and shows video t
   HEVC, VP8/VP9, AV1, MPEG-2, ProRes and more, in MP4/MOV, MKV/WebM, AVI, MPEG-TS and MXF. Its
   `symphonia` dependency (MPL-2.0) is allowed by name. Dropped the compatibility code for older
   tags.json and collection.json files (nothing is published yet).
+- 2026-10-30 — R2: CI on GitHub Actions through the Craft suite's shared gate
+  (`storytold/craft-common-actions` `gate.yml`, as FilmCraft calls it), plus Dependabot;
+  `cargo xtask ci` now ends with `cargo deny`, and `scripts/check.sh` runs that same gate in
+  Podman for local work.

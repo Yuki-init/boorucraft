@@ -74,6 +74,8 @@ fn ci() -> Result<(), String> {
     cargo(&["test", "--workspace", "--locked"])?;
     layers()?;
     rust_only()?;
+    // Licences, bans and sources (deny.toml); everything is fetched by now, so no network.
+    cargo(&["deny", "--offline", "check", "licenses", "bans", "sources"])?;
     eprintln!("==> ci passed");
     Ok(())
 }

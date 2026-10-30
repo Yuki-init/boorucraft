@@ -12,8 +12,10 @@ never crash) bind you and win over anything here.
 
 ## Habits
 
-- **Build and test only through Podman**: `scripts/dev.sh <cmd>` (offline), `scripts/fetch.sh`
-  (network, after changing dependencies), `scripts/check.sh` (the full gate). Nothing is installed
+- **CI is GitHub Actions** (`.github/workflows/ci.yml`, the Craft suite's shared gate running
+  `cargo xtask ci`). **Locally, build and test only through Podman**: `scripts/dev.sh <cmd>`
+  (offline), `scripts/fetch.sh` (network, after changing dependencies), `scripts/check.sh` (the
+  same `cargo xtask ci` as CI). Nothing is installed
   on the host. Rebuild the image with `scripts/build-image.sh` after changing
   `containers/dev.Containerfile` or `rust-toolchain.toml`.
 - **Never point BooruCraft at the user's real picture folders while developing**: it writes
