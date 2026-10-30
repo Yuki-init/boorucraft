@@ -8,13 +8,73 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::library::Hit;
 
+type Decoded = Result<Vec<boorucraft_thumbs::Frame>, String>;
+
+/// Decodes a picture on a thread; the result arrives on the receiver.
+fn start_load(path: PathBuf, format: &str, max_side: u32, ctx: &egui::Context) -> Result<Receiver<Decoded>, String> {
+    let (tx, rx) = channel();
+    let (format, ctx) = (format.to_string(), ctx.clone());
+    std::thread::Builder::new()
+        .name("viewer".into())
+        .spawn(move || {
+            let result = boorucraft_thumbs::decode_frames(&path, &format)
+                .map(|frames| {
+                    frames.into_iter().map(|f| boorucraft_thumbs::Frame { image: boorucraft_thumbs::fit_within(f.image, max_side), delay: f.delay }).collect()
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rx)
+}
+
+/// A picture decoding ahead of time (the next one in the viewer or slideshow), handed to
+/// [`Viewer::open`] when the user gets there.
+pub struct Preload {
+    pub pos: usize,
+    hash: String,
+    path: PathBuf,
+    rx: Receiver<Decoded>,
+}
+
+impl Preload {
+    /// Starts decoding, or returns `None` for files the viewer doesn't decode itself.
+    pub fn start(pos: usize, hash: &str, path: PathBuf, format: &str, max_side: u32, ctx: &egui::Context) -> Option<Preload> {
+        if !boorucraft_thumbs::can_decode(format) {
+            return None;
+        }
+        let rx = start_load(path.clone(), format, max_side, ctx).ok()?;
+        Some(Preload { pos, hash: hash.to_string(), path, rx })
+    }
+
+    pub fn is_for(&self, hash: &str) -> bool {
+        self.hash == hash
+    }
+}
+
+/// Where the viewer will most likely go next from `pos` of `n`: on in the direction it last
+/// moved, or back to the start in a looping slideshow (`slideshow`: whether it loops).
+pub fn next_pos(pos: usize, n: usize, backwards: bool, slideshow: Option<bool>) -> Option<usize> {
+    if backwards {
+        return pos.checked_sub(1);
+    }
+    if pos.saturating_add(1) < n {
+        Some(pos + 1)
+    } else if slideshow == Some(true) && n > 1 {
+        Some(0)
+    } else {
+        None
+    }
+}
+
 pub struct LoadedFrame {
     pub texture: egui::TextureHandle,
     pub delay: Duration,
 }
 
 enum Content {
-    Loading(Receiver<Result<Vec<boorucraft_thumbs::Frame>, String>>),
+    Loading(Receiver<Decoded>),
     Ready {
         frames: Vec<LoadedFrame>,
         size: Vec2,
@@ -39,30 +99,18 @@ pub struct Viewer {
 
 impl Viewer {
     /// Opens a file. Decodable pictures load on a thread; `max_side` is the GPU texture limit.
-    pub fn open(pos: usize, hit: Hit, path: Option<PathBuf>, format: &str, max_side: u32, ctx: &egui::Context) -> Viewer {
+    /// `early` is a load already started for this file by [`Preload::start`], used if it matches.
+    pub fn open(pos: usize, hit: Hit, path: Option<PathBuf>, format: &str, max_side: u32, ctx: &egui::Context, early: Option<Preload>) -> Viewer {
         let content = match path {
             None => Content::Failed("this file is missing".into()),
             Some(_) if !boorucraft_thumbs::can_decode(format) => Content::External,
-            Some(path) => {
-                let (tx, rx) = channel();
-                let (format, ctx) = (format.to_string(), ctx.clone());
-                let spawned = std::thread::Builder::new().name("viewer".into()).spawn(move || {
-                    let result = boorucraft_thumbs::decode_frames(&path, &format)
-                        .map(|frames| {
-                            frames
-                                .into_iter()
-                                .map(|f| boorucraft_thumbs::Frame { image: boorucraft_thumbs::fit_within(f.image, max_side), delay: f.delay })
-                                .collect()
-                        })
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(result);
-                    ctx.request_repaint();
-                });
-                match spawned {
-                    Ok(_) => Content::Loading(rx),
-                    Err(e) => Content::Failed(e.to_string()),
-                }
-            }
+            Some(path) => match early.filter(|p| p.hash == hit.hash && p.path == path) {
+                Some(p) => Content::Loading(p.rx),
+                None => match start_load(path, format, max_side, ctx) {
+                    Ok(rx) => Content::Loading(rx),
+                    Err(e) => Content::Failed(e),
+                },
+            },
         };
         Viewer { pos, hit, content, frame: 0, frame_shown: Instant::now(), zoom: None, pan: Vec2::ZERO }
     }
@@ -225,6 +273,18 @@ pub fn show_in_folder(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preloads_in_the_direction_of_travel() {
+        assert_eq!(next_pos(3, 10, false, None), Some(4));
+        assert_eq!(next_pos(3, 10, true, None), Some(2));
+        assert_eq!(next_pos(0, 10, true, None), None);
+        assert_eq!(next_pos(9, 10, false, None), None);
+        assert_eq!(next_pos(9, 10, false, Some(false)), None);
+        assert_eq!(next_pos(9, 10, false, Some(true)), Some(0), "a looping slideshow wraps");
+        assert_eq!(next_pos(0, 1, false, Some(true)), None, "nothing else to show");
+        assert_eq!(next_pos(usize::MAX, 10, false, None), None);
+    }
 
     #[test]
     fn fit_never_enlarges() {

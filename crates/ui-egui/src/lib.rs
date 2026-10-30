@@ -27,7 +27,7 @@ use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Rect, Rich
 use library::{CollState, Config, Dirs, Hit, Library, Outside, PoolMove, StackKey};
 use selection::Selection;
 use thumbnails::{Thumb, Thumbnails};
-use viewer::Viewer;
+use viewer::{Preload, Viewer};
 
 const SEARCH_ID: &str = "search";
 const TAG_INPUT_ID: &str = "tag-input";
@@ -78,6 +78,10 @@ pub struct App {
     searched: Option<String>,
     sel: Selection,
     viewer: Option<Viewer>,
+    /// The picture after the one in the viewer, decoding ahead of time.
+    preload: Option<Preload>,
+    /// The viewer last moved back through the results (so preload the one before).
+    backwards: bool,
     tile: f32,
     columns: usize,
     /// Scroll the grid so this result is visible.
@@ -136,6 +140,8 @@ impl App {
             searched: None,
             sel: Selection::default(),
             viewer: None,
+            preload: None,
+            backwards: false,
             tile,
             columns: 1,
             scroll_to: None,
@@ -186,7 +192,37 @@ impl App {
         let path = self.lib.path_of(&hit).filter(|p| p.exists());
         let max_side = ctx.input(|i| i.max_texture_side) as u32;
         self.sel.only(pos);
-        self.viewer = Some(Viewer::open(pos, hit, path, &format, max_side.max(1024), ctx));
+        // A slideshow wrapping round to the start is still going forwards.
+        self.backwards = self.slideshow.is_none() && self.viewer.as_ref().is_some_and(|v| pos < v.pos);
+        self.viewer = Some(Viewer::open(pos, hit, path, &format, max_side.max(1024), ctx, self.preload.take()));
+    }
+
+    /// Once the picture on screen has loaded, starts decoding the next one, so moving on is
+    /// instant. Only one picture is kept ahead, to bound memory.
+    fn preload_next(&mut self, ctx: &egui::Context) {
+        let Some(v) = &self.viewer else {
+            self.preload = None;
+            return;
+        };
+        if !v.is_ready() {
+            return;
+        }
+        let looping = self.slideshow.as_ref().map(|s| s.looping);
+        let Some(next) = viewer::next_pos(v.pos, self.lib.hits.len(), self.backwards, looping) else {
+            self.preload = None;
+            return;
+        };
+        let Some(hit) = self.lib.hits.get(next) else { return };
+        if self.preload.as_ref().is_some_and(|p| p.pos == next && p.is_for(&hit.hash)) {
+            return;
+        }
+        let format = self.lib.entry(hit).map(|e| e.format.clone()).unwrap_or_default();
+        let Some(path) = self.lib.path_of(hit).filter(|p| p.exists()) else {
+            self.preload = None;
+            return;
+        };
+        let max_side = ctx.input(|i| i.max_texture_side) as u32;
+        self.preload = Preload::start(next, &hit.hash, path, &format, max_side.max(1024), ctx);
     }
 
     /// Starts a slideshow (from the picture in the viewer, else the first selected result, else
@@ -1512,6 +1548,7 @@ impl eframe::App for App {
         self.thumbs.begin_frame(&ctx);
         self.handle_keys(&ctx);
         self.run_slideshow(&ctx);
+        self.preload_next(&ctx);
 
         // A fullscreen picture gets the whole screen: no bars or panels.
         if self.viewer.is_some() && is_fullscreen(&ctx) {

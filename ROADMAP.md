@@ -119,3 +119,5 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 - 2026-10-30 — P1: scans show their progress ("12 files found", then "hashing 40 / 120") on the
   collection card, in the status bar and in the empty grid. `--during-scan` lets `--screenshot`
   capture a running scan.
+- 2026-10-30 — P2: the viewer and slideshow decode the next picture (in the direction of travel,
+  wrapping in a looping slideshow) once the current one has loaded, so stepping on is instant.

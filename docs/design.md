@@ -449,6 +449,11 @@ time), Esc stops. Interval (2–60 s, default 5) and looping (default on) are ke
 drawn; a hint with the position and keys shows for 2.5 s after any mouse move or key. Esc leaves
 fullscreen and stops the slideshow.
 
+**Preloading**: once the picture on screen has loaded, the next one decodes on a thread: the
+one after it, or before it if the user last stepped back, or the first in a looping slideshow at
+the end. Only one picture is kept ahead, to bound memory; the viewer takes it over if the user
+goes there, and drops it otherwise.
+
 ## Open questions
 
 None at the moment.
