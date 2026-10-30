@@ -26,7 +26,8 @@ md-5 = { workspace = true }
 imagesize = { workspace = true }
 kamadak-exif = { workspace = true }
 notify = { workspace = true }
-playcraft-media = { workspace = true }
+filmcraft-codecs = { workspace = true }
+filmcraft-media = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,9 +1,9 @@
 //! Decoding pictures in pure Rust, and the thumbnail cache.
 //!
 //! Decodable formats: JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI (`image` crate) and JPEG XL
-//! (`jxl-oxide`). Videos in MP4/MOV and Matroska/WebM with H.264 get a thumbnail from a frame
-//! near the start (PlayCraft's decoders) but play in the default app. Anything else (AVIF, HEIC,
-//! raw photos, other video codecs) gets a placeholder in the UI and opens in the default app.
+//! (`jxl-oxide`). Videos get a thumbnail from a frame near the start, decoded by FilmCraft's
+//! media sources, but play in the default app. Anything else (AVIF, HEIC, raw photos, videos
+//! FilmCraft can't decode) gets a placeholder in the UI and opens in the default app.
 //!
 //! Thumbnails live in `<cache>/thumbs/ab/<hash>.jpg` (`.png` when the picture has transparency),
 //! at most [`THUMB_SIZE`] pixels on the long side. Pictures are untrusted: sizes and allocations
@@ -50,8 +50,9 @@ pub fn can_decode(format: &str) -> bool {
     matches!(format, "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "ico" | "qoi" | "jxl")
 }
 
-/// Video formats [`decode`] can take a frame from (if the video is H.264).
-pub const VIDEO_FORMATS: [&str; 4] = ["mp4", "mov", "mkv", "webm"];
+/// Video formats [`decode`] can take a frame from, through FilmCraft (if their codec is one it
+/// decodes: H.264, HEVC, VP8, VP9, AV1, MPEG-2, ProRes and more).
+pub const VIDEO_FORMATS: [&str; 11] = ["mp4", "mov", "mkv", "webm", "avi", "mpeg", "ts", "m2ts", "mts", "mxf", "3gp"];
 
 /// Whether BooruCraft can make a thumbnail for this format: the pictures it decodes, and videos.
 pub fn can_thumbnail(format: &str) -> bool {
@@ -64,24 +65,28 @@ fn thumbnail_time(duration: f64) -> f64 {
     if duration.is_finite() && duration > 0.0 { (duration * 0.1).min(3.0) } else { 0.0 }
 }
 
-/// A frame from near the start of a video.
+/// Opens a video as FilmCraft does: the container's index now, frames read on demand (never
+/// the whole file).
+pub fn open_video(path: &Path) -> Result<filmcraft_media::SharedSource, ThumbError> {
+    let reader = filmcraft_media::reader::FileReader::open(path).map_err(|e| ThumbError::Io(path.to_path_buf(), e))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    filmcraft_media::reader::open_reader_within(&name, std::sync::Arc::new(reader), &filmcraft_codecs::reader_openers(), &[], 0)
+        .map_err(|e| ThumbError::Decode(path.to_path_buf(), e.to_string()))
+}
+
+/// A frame from near the start of a video, at about thumbnail size.
 fn video_frame(path: &Path) -> Result<DynamicImage, ThumbError> {
-    let err = |e: playcraft_media::Error| ThumbError::Decode(path.to_path_buf(), e.to_string());
-    let media = playcraft_media::Media::open(path).map_err(err)?;
-    let track = media.default_video().ok_or_else(|| ThumbError::Decode(path.to_path_buf(), "no video track".into()))?;
-    let mut decoder = media.video(track).map_err(err)?;
-    let t = thumbnail_time(media.duration_secs());
-    if t > 0.0 {
-        decoder.seek(t).map_err(err)?;
-    }
-    let frame = match decoder.next_frame().map_err(err)? {
-        Some(f) => f,
-        // Seeked past the last frame (a wrong duration): take the first one.
-        None if t > 0.0 => {
-            decoder.seek(0.0).map_err(err)?;
-            decoder.next_frame().map_err(err)?.ok_or_else(|| ThumbError::Decode(path.to_path_buf(), "no frames".into()))?
-        }
-        None => return Err(ThumbError::Decode(path.to_path_buf(), "no frames".into())),
+    let err = |e: filmcraft_media::MediaError| ThumbError::Decode(path.to_path_buf(), e.to_string());
+    let src = open_video(path)?;
+    let info = src.info();
+    let video = info.video.as_ref().ok_or_else(|| ThumbError::Decode(path.to_path_buf(), "no video stream".into()))?;
+    let long = video.width.max(video.height).max(1) as f32;
+    let scale = (2.0 * THUMB_SIZE as f32 / long).clamp(0.02, 1.0);
+    let t = filmcraft_time::Tick::from_seconds_f64(thumbnail_time(info.duration.seconds()));
+    let frame = match src.video_frame(filmcraft_media::FrameRequest { time: t, scale }) {
+        Ok(f) => f,
+        // A wrong duration or a damaged middle: try the first frame.
+        Err(_) => src.video_frame(filmcraft_media::FrameRequest { time: filmcraft_time::Tick::ZERO, scale }).map_err(err)?,
     };
     if frame.width == 0 || frame.height == 0 || frame.width > MAX_SIDE || frame.height > MAX_SIDE {
         return Err(ThumbError::Decode(path.to_path_buf(), format!("bad frame size {}×{}", frame.width, frame.height)));
@@ -442,7 +447,7 @@ mod tests {
         assert_eq!(img.get_pixel(40, 25).0, [0, 0, 0, 255], "elsewhere: black");
         let cache = ThumbCache::new(&dir.path().join("cache"));
         assert_eq!(cache.get_or_make(&"ef".repeat(32), &src, "mkv").unwrap().dimensions(), (48, 32));
-        assert!(can_thumbnail("mkv") && can_thumbnail("mp4") && can_thumbnail("png") && !can_thumbnail("avi"));
+        assert!(can_thumbnail("mkv") && can_thumbnail("mp4") && can_thumbnail("avi") && can_thumbnail("png") && !can_thumbnail("wmv"));
         assert!(!can_decode("mkv"), "the viewer still opens videos in the default app");
 
         // Damaged or empty videos are errors, not crashes.

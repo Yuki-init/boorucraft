@@ -131,3 +131,8 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 - 2026-10-30 — L2: aliases and implications on the Tags screen (the tag editor lists and edits
   them; the filter matches aliases); the side panel's tag box takes aliases. A tag gained through
   a rename or merge now brings what it implies.
+- 2026-10-30 — P4: videos through FilmCraft's `filmcraft-codecs` (git dependency pinned by
+  commit, as the Craft apps share code) instead of PlayCraft's crates: thumbnails for H.264,
+  HEVC, VP8/VP9, AV1, MPEG-2, ProRes and more, in MP4/MOV, MKV/WebM, AVI, MPEG-TS and MXF. Its
+  `symphonia` dependency (MPL-2.0) is allowed by name. Dropped the compatibility code for older
+  tags.json and collection.json files (nothing is published yet).

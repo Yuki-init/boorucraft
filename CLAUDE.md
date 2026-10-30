@@ -22,8 +22,9 @@ never crash) bind you and win over anything here.
   `scripts/dev.sh env BOORUCRAFT_CONFIG_DIR=/work/.cache/cfg BOORUCRAFT_CACHE_DIR=/work/.cache/cache cargo run -p boorucraft-cli -- scan .cache/sample`.
   A real folder can be mounted read-only at `/pictures` via `scripts/local.env`
   (`BOORUCRAFT_PICTURES_HOST_DIR=…`) for reading only.
-- Video support uses PlayCraft's crates from `../playcraft` (a path dependency; the scripts mount
-  it read-only at `/playcraft`). Keep that checkout next to this one.
+- Video thumbnails use FilmCraft's decoder crates and craft-media as git dependencies pinned by
+  commit; update them by bumping the revisions in the root `Cargo.toml` (keep craft-media at the
+  revision FilmCraft uses).
 - Test pictures are generated in code (see `png()` in the index and CLI tests); never commit
   real pictures.
 - Before adding a dependency, check `cargo xtask rust-only` and `cargo deny` still pass.

@@ -13,9 +13,6 @@ fi
 # A pictures folder to mount read-only at /pictures for manual testing. Unset: none.
 PICTURES_HOST_DIR="${BOORUCRAFT_PICTURES_HOST_DIR:-}"
 
-# PlayCraft's checkout, for its video decoders (a path dependency at ../playcraft).
-PLAYCRAFT_DIR="${BOORUCRAFT_PLAYCRAFT_DIR:-$(cd "$REPO_ROOT/.." && pwd)/playcraft}"
-
 # Reads the pinned toolchain version from rust-toolchain.toml.
 rust_version() {
     sed -n 's/^channel *= *"\(.*\)"/\1/p' "$REPO_ROOT/rust-toolchain.toml"
@@ -49,10 +46,6 @@ podman_args() {
     # Always read-only, and no relabel option: relabeling would write to the folder.
     if [[ -n "$PICTURES_HOST_DIR" && -d "$PICTURES_HOST_DIR" ]]; then
         RUN_ARGS+=(-v "$PICTURES_HOST_DIR":/pictures:ro)
-    fi
-    # Read-only and not relabelled, like the pictures folder.
-    if [[ -d "$PLAYCRAFT_DIR" ]]; then
-        RUN_ARGS+=(-v "$PLAYCRAFT_DIR":/playcraft:ro)
     fi
     if [[ -t 0 && -t 1 ]]; then
         RUN_ARGS+=(-it)

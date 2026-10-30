@@ -19,7 +19,7 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[
 ];
 /// Camera raw formats; opened in the system's default app.
 pub const RAW_EXTENSIONS: &[&str] = &["dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf"];
-pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv", "flv", "mpg", "mpeg", "ts", "3gp"];
+pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "mts", "mxf", "3gp"];
 
 pub struct Hashes {
     pub sha256: String,
@@ -112,22 +112,19 @@ fn probe_inner(path: &Path, header: &[u8], extension: &str) -> Meta {
 /// read the container (MP4/MOV, Matroska/WebM; only headers and sample tables are read).
 fn probe_video(path: &Path, extension: &str) -> Meta {
     let mut meta = fallback(extension);
-    if !matches!(meta.format.as_str(), "mp4" | "mov" | "mkv" | "webm") {
-        return meta;
-    }
-    let Ok(media) = playcraft_media::Media::open(path) else { return meta };
-    // Any video track will do for the size, even one PlayCraft can't decode yet.
-    let tracks = media.tracks();
-    let video =
-        media.default_video().and_then(|i| tracks.iter().find(|t| t.index == i)).or_else(|| tracks.iter().find(|t| t.kind == playcraft_media::Kind::Video));
-    if let Some(t) = video
-        && t.width > 0
-        && t.height > 0
-    {
-        meta.width = Some(t.width);
-        meta.height = Some(t.height);
+    if let Some((w, h)) = video_size(path) {
+        meta.width = Some(w);
+        meta.height = Some(h);
     }
     meta
+}
+
+/// A video's size from its container and stream headers, through FilmCraft (frames aren't read).
+fn video_size(path: &Path) -> Option<(u32, u32)> {
+    let reader = filmcraft_media::reader::FileReader::open(path).ok()?;
+    let src = filmcraft_media::reader::open_reader_within("", std::sync::Arc::new(reader), &filmcraft_codecs::reader_openers(), &[], 0).ok()?;
+    let v = src.info().video.as_ref()?;
+    (v.width > 0 && v.height > 0).then_some((v.width, v.height))
 }
 
 fn format_name(t: &imagesize::ImageType) -> String {

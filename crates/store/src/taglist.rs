@@ -19,9 +19,7 @@ use crate::safefile::{self, DiskChange, Lock, Meta, Stamp};
 use crate::{Result, StoreError};
 
 pub const FORMAT: &str = "boorucraft-tags";
-/// Version 2 added aliases and implications; files that use neither are still written as 1, so
-/// older BooruCraft builds keep reading them.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 1;
 /// Deepest chain of implications followed (they can't form loops, but the file is hand-editable).
 const MAX_IMPLICATION_DEPTH: usize = 64;
 /// Biggest tags.json we read.
@@ -108,8 +106,7 @@ impl Default for TagListFile {
         let ns = |c: &str| NamespaceInfo { color: c.to_string() };
         TagListFile {
             format: FORMAT.into(),
-            // Raised to 2 on save once aliases or implications are used.
-            version: 1,
+            version: VERSION,
             revision: 0,
             namespaces: [("artist", ns("#d04040")), ("character", ns("#40a040")), ("series", ns("#a040c0")), ("meta", ns("#e09030"))]
                 .into_iter()
@@ -632,9 +629,6 @@ impl TagList {
             return Err(StoreError::ReadOnly(self.path.clone()));
         }
         safefile::check_unchanged(&self.path, self.stamp, MAX_BYTES)?;
-        let uses_v2 =
-            !self.data.aliases.is_empty() || !self.data.implications.is_empty() || self.data.history.iter().any(|h| matches!(h.op, HistoryOp::Imply { .. }));
-        self.data.version = self.data.version.max(if uses_v2 { 2 } else { 1 });
         let mut bytes = serde_json::to_vec_pretty(&self.data).map_err(|source| StoreError::Json { path: self.path.clone(), source })?;
         bytes.push(b'\n');
         self.stamp = Some(safefile::write_atomic(&self.path, &bytes, true)?);
@@ -827,19 +821,15 @@ mod tests {
     }
 
     #[test]
-    fn version_2_only_when_needed() {
+    fn aliases_and_implications_are_saved() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tags.json");
         let mut t = TagList::open(&path).unwrap();
         t.create("cat", "").unwrap();
         t.create("animal", "").unwrap();
-        t.save().unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().contains("\"version\": 1"), "older builds can still read it");
         t.add_implication("cat", "animal").unwrap();
         t.add_alias("neko", "cat").unwrap();
         t.save().unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\": 2") && text.contains("\"neko\": \"cat\""), "{text}");
         drop(t);
         let t = TagList::open(&path).unwrap();
         assert_eq!((t.resolve("neko").unwrap().as_str(), t.implies("cat").count()), ("cat", 1));

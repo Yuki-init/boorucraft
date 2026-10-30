@@ -15,7 +15,9 @@ boorucraft-store = { workspace = true }
 boorucraft-dedup = { workspace = true }
 image = { workspace = true }
 jxl-oxide = { workspace = true }
-playcraft-media = { workspace = true }
+filmcraft-codecs = { workspace = true }
+filmcraft-media = { workspace = true }
+filmcraft-time = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

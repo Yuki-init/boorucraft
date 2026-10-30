@@ -17,7 +17,9 @@ notes; if the two disagree, **this file wins**.
   desktop portal) is fine.
 - Formats the app can't decode in Rust are still indexed, tagged and searched, and open in the
   system's default app (`open` crate). Never add a C decoder to show them.
-- Permissive licences only (`cargo deny`): no GPL, LGPL or MPL dependencies.
+- Permissive licences only (`cargo deny`): no GPL, LGPL or MPL dependencies. **Exception:** what
+  the official Crafting Apps' crates pull in is accepted as they use it (today `symphonia`,
+  MPL-2.0, unmodified, through FilmCraft's `filmcraft-codecs`); `deny.toml` names each such crate.
 
 ## 2. Never damage the user's files
 

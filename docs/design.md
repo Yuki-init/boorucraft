@@ -122,8 +122,6 @@ location can be changed in settings, e.g. to a synced folder so several computer
   adds), so files that already have the tag get the rest, in closed collections when they next
   open. Removing an implication, or removing an implied tag from a file, leaves the other tags
   alone. Loops are refused; a hand-edited loop is cut off rather than followed forever.
-- `version` is 1 until aliases or implications are used, then 2, so older builds refuse the file
-  rather than drop them.
 
 Counts per tag are not stored; they are computed in memory for the open collections.
 
@@ -292,10 +290,10 @@ bmp, tiff, jxl, avif, heic, mp4, webm, mkv, mov…). The list is configurable pe
 | | Decoded by the app | Opened externally |
 |---|---|---|
 | Formats | JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI, JPEG XL | AVIF, HEIC/HEIF, videos (MP4, WebM, MKV, MOV…), RAW photos, anything else |
-| Thumbnail | yes | format icon with a label (e.g. "HEIC"); H.264 videos in MP4/MOV/MKV/WebM show a frame from near the start (10% in, at most 3 s) with a play badge |
+| Thumbnail | yes | format icon with a label (e.g. "HEIC"); videos FilmCraft decodes show a frame from near the start with a play badge |
 | In-app viewer | yes (zoom, pan, animation) | the viewer shows the format icon and an "Open in default app" button; Enter / double-click opens it directly |
 | Tags, rating, search | yes | yes |
-| Dimensions | yes | from headers where `imagesize` supports it (AVIF, HEIC); videos in MP4/MOV/MKV/WebM from the video track, whatever its codec; otherwise unknown |
+| Dimensions | yes | from headers where `imagesize` supports it (AVIF, HEIC); videos from their stream headers (FilmCraft); otherwise unknown |
 | Exact duplicates | yes | yes (hash) |
 | Near duplicates | yes | no (needs decoded pixels) |
 
@@ -303,13 +301,15 @@ Opening externally uses the `open` crate, which hands the file to the desktop's 
 (`xdg-open` on Linux). Every file, decodable or not, also has "Open in default app" and
 "Show in file manager" actions.
 
-Videos go through PlayCraft's pure-Rust crates (`playcraft-media`: MP4/MOV and Matroska
-demuxing, H.264 decoding), taken as a path dependency from the PlayCraft checkout next to this
-one (`../playcraft`, mounted read-only at `/playcraft` in the dev container). Other codecs get
-thumbnails as PlayCraft learns them. Playback still goes to the system player, and videos are
-left out of near-duplicate search. Video files are recognised by extension before their header
-is read: MP4 and MOV share HEIC's container and were once stored as HEIC pictures; a scan
-probes such entries again and corrects them.
+Videos go through FilmCraft's media sources (`filmcraft-codecs`: MP4/MOV, Matroska/WebM, AVI,
+MPEG-TS/PS, MXF; H.264, HEVC, VP8, VP9, AV1, MPEG-2, ProRes and more, all pure Rust), as git
+dependencies pinned by commit and updated together with the Craft apps. They are compiled in:
+BooruCraft needs no other Craft app installed. A video is opened the way FilmCraft opens
+previews (the container's index, frames read on demand, never the whole file); its size comes
+from the stream headers and its thumbnail from a frame near the start (10% in, at most 3 s).
+Playback still goes to the system player, and videos are left out of near-duplicate search.
+Video files are recognised by extension before their header is read, since MP4 and MOV share
+HEIC's container.
 
 ## Search syntax (D8)
 

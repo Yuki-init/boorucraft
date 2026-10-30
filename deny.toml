@@ -21,6 +21,23 @@ allow = [
 ]
 confidence-threshold = 0.9
 unused-allowed-license = "allow"
+# Pulled in unmodified by FilmCraft's filmcraft-codecs (its audio decoding), which BooruCraft uses
+# for videos as FilmCraft does. Only these crates may be MPL-2.0 (AGENTS.md section 1).
+exceptions = [
+    { crate = "symphonia", allow = ["MPL-2.0"] },
+    { crate = "symphonia-core", allow = ["MPL-2.0"] },
+    { crate = "symphonia-metadata", allow = ["MPL-2.0"] },
+    { crate = "symphonia-utils-xiph", allow = ["MPL-2.0"] },
+    { crate = "symphonia-bundle-flac", allow = ["MPL-2.0"] },
+    { crate = "symphonia-bundle-mp3", allow = ["MPL-2.0"] },
+    { crate = "symphonia-codec-aac", allow = ["MPL-2.0"] },
+    { crate = "symphonia-codec-alac", allow = ["MPL-2.0"] },
+    { crate = "symphonia-codec-pcm", allow = ["MPL-2.0"] },
+    { crate = "symphonia-codec-vorbis", allow = ["MPL-2.0"] },
+    { crate = "symphonia-format-isomp4", allow = ["MPL-2.0"] },
+    { crate = "symphonia-format-ogg", allow = ["MPL-2.0"] },
+    { crate = "symphonia-format-riff", allow = ["MPL-2.0"] },
+]
 
 [licenses.private]
 ignore = true
@@ -34,5 +51,5 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# craft-media, PlayCraft's container parsing (through playcraft-media).
-allow-git = ["https://github.com/storytold/craft-libs"]
+# craft-media (containers) and FilmCraft's video decoders, pinned by commit.
+allow-git = ["https://github.com/storytold/craft-libs", "https://github.com/storytold/filmcraft"]
