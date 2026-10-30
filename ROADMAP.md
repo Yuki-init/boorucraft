@@ -9,7 +9,7 @@ with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to 
 | M0 | Repo, Podman gate (copy PlayCraft's scripts), workspace, Rust-only dependency check, central `tags.json` and `collection.json` formats with atomic save, backup and lock, in-memory tag index, XMP sidecar read/update that keeps other apps' fields, scanner (hash, metadata, path tracking), `boorucraft-cli scan / info / tag / search` with plain tags | done |
 | M1 | Desktop app: add and open collection folders, thumbnail cache and worker pool, virtualised grid, viewer (zoom, pan, next/prev, animation), open unsupported formats in the default app, tag editor with the central tag list and "Create tag", bulk tagging, ratings | done |
 | M2 | Full search syntax (negation, OR, wildcards, every metatag, `order:`), error underline, autocomplete, tag sidebar with counts, namespaces and colours | done |
-| M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates) | |
+| M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates); grouping: parent/child links and pools, stacked in the grid | in progress (M3.1 done) |
 | M4 | File watching, reload on outside changes, missing-file handling, Tags screen (rename/merge/delete across all collections, catch-up for closed ones), Unknown tags review, reading back sidecars edited by other apps, rebuild from sidecars, saved searches, slideshow | |
 | Later | Tag aliases and implications; import tags from boorus by MD5; local ML auto-tagger; pools/collections; video thumbnails via PlayCraft's Rust decoders | |
 
@@ -55,3 +55,11 @@ with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to 
   Ctrl+click excludes. Grid tiles stretch to fill the row. Fixed: focusing a text box from the
   keyboard (`/`, `t`) didn't stick, and the cursor now lands at the end. `scripts/screenshot.sh`
   gives the Xvfb window focus (xdotool) so popups show in screenshots.
+- 2026-10-30 — M3 planned with grouping added: M3.1 perceptual hashes and `dupes:`, M3.2 review
+  screen, M3.3 parent/child links, M3.4 pools (names in the central tag list, positions in
+  `collection.json`), M3.5 stacks in the grid.
+- 2026-10-30 — M3.1: new `dedup` crate (L1, pure: dHash, pHash, BK-tree, union-find groups);
+  `thumbs` hashes thumbnails; `index::find_groups` groups across collections (best copy first,
+  "not duplicates" respected); a background job in the app hashes new pictures after scans;
+  `dupes:yes/no` in searches; `boorucraft-cli dupes DIR… [--threshold N]`. Default threshold
+  lowered from 8 to 6 after a false match between two flat wallpapers on the sample copy.

@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use boorucraft_core::{Query, Rating};
-use boorucraft_index::{ScanCache, SidecarReport, scan, write_sidecars};
-use boorucraft_store::{Collection, SearchIndex, StoreError, TagList, paths};
+use boorucraft_index::{ScanCache, SidecarReport, find_groups, needing_hashes, scan, set_hashes, write_sidecars};
+use boorucraft_store::{Collection, Links, SearchIndex, StoreError, TagList, paths};
+use rayon::prelude::*;
 
 const USAGE: &str = "usage:
   boorucraft-cli scan DIR                    index a folder (creates DIR/collection.json)
@@ -15,6 +16,8 @@ const USAGE: &str = "usage:
   boorucraft-cli info DIR [FILE]             collection summary, or one file's details
   boorucraft-cli tag DIR FILE TAG... [--rating s|q|e|none] [--source URL|none] [--create]
                                              TAG adds, -TAG removes; --create adds new tags to the list
+  boorucraft-cli dupes DIR... [--threshold N] find near-duplicates (hashes missing pictures first;
+                                             N is the most differing bits, default 6)
   boorucraft-cli unknown DIR                 tags used in DIR that aren't in the tag list
   boorucraft-cli tags [PREFIX]               list tags (with descriptions)
   boorucraft-cli tags create TAG...
@@ -27,7 +30,7 @@ const USAGE: &str = "usage:
 
 Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
   rating:s,q  width:>1920  height:<=1080  ratio:16:9  mpixels:>2  filesize:<2MB
-  type:png,gif  kind:video  animated:yes  missing:yes  tagcount:0  md5:…  hash:3fa9
+  type:png,gif  kind:video  animated:yes  missing:yes  dupes:yes  tagcount:0  md5:…  hash:3fa9
   date:2024-01..2024-06  date:>2023-05-01  imported:<7d  path:\"holiday 2023\"  source:none
   order:date  order:-filesize  order:name  order:random  (default: newest imported first)
 Environment: BOORUCRAFT_TAGS (tag list file), BOORUCRAFT_CONFIG_DIR, BOORUCRAFT_CACHE_DIR";
@@ -54,6 +57,7 @@ fn run(args: &[String]) -> Res {
         ["info", dir, file] => cmd_info(Path::new(dir), Some(Path::new(file))),
         ["tag", dir, file, rest @ ..] if !rest.is_empty() => cmd_tag(Path::new(dir), Path::new(file), rest),
         ["unknown", dir] => cmd_unknown(Path::new(dir)),
+        ["dupes", rest @ ..] if !rest.is_empty() => cmd_dupes(rest),
         ["tags", rest @ ..] => cmd_tags(rest),
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
@@ -131,7 +135,8 @@ fn cmd_search(dir: &Path, query: &str) -> Res {
     let tags = open_tags(false)?;
     let (c, _) = open_collection(dir, false, &tags)?;
     let index = SearchIndex::build(&c);
-    let hits = index.search(&q);
+    let links = links_for(&c, &q);
+    let hits = index.search(&q, &links);
     for hash in &hits {
         let Some(e) = c.get(hash) else { continue };
         let Some(rel) = e.paths.first() else { continue };
@@ -143,6 +148,72 @@ fn cmd_search(dir: &Path, query: &str) -> Res {
         }
     }
     eprintln!("{} of {} file(s)", hits.len(), index.len());
+    Ok(())
+}
+
+/// What a query needs to know about files beyond their own entry: only worked out when the
+/// query uses it. Uses the perceptual hashes already stored (`dupes` computes missing ones).
+fn links_for(c: &Collection, q: &Query) -> Links {
+    let mut links = Links::default();
+    if q.terms.iter().any(|t| matches!(t.kind, boorucraft_core::TermKind::Dupes(_))) {
+        links.dupes = find_groups(&[Some(c)], boorucraft_dedup::DEFAULT_THRESHOLD, |_, _| false).into_iter().flatten().map(|(_, h)| h).collect();
+    }
+    links
+}
+
+fn cmd_dupes(rest: &[&str]) -> Res {
+    let mut dirs = Vec::new();
+    let mut threshold = boorucraft_dedup::DEFAULT_THRESHOLD;
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        if a == "--threshold" {
+            let v = it.next().ok_or("--threshold needs a number")?;
+            threshold = v
+                .parse()
+                .ok()
+                .filter(|n| *n <= boorucraft_dedup::MAX_THRESHOLD)
+                .ok_or_else(|| format!("--threshold takes 0 to {}", boorucraft_dedup::MAX_THRESHOLD))?;
+        } else if a.starts_with("--") {
+            return Err(format!("unknown option {a}"));
+        } else {
+            dirs.push(Path::new(a));
+        }
+    }
+    let tags = open_tags(false)?;
+    let thumbs = boorucraft_thumbs::ThumbCache::new(&paths::cache_dir());
+    let mut colls = Vec::new();
+    for dir in dirs {
+        let (mut c, cache) = open_collection(dir, true, &tags)?;
+        let todo: Vec<_> = needing_hashes(&c).into_iter().filter(|(_, _, f)| boorucraft_thumbs::can_decode(f)).collect();
+        if !todo.is_empty() {
+            eprintln!("{}: hashing {} picture(s)…", dir.display(), todo.len());
+            let results: Vec<_> = todo.par_iter().map(|(hash, path, format)| (hash, path, thumbs.thumbnail_and_hashes(hash, path, format))).collect();
+            for (hash, path, r) in results {
+                match r {
+                    Ok((_, h)) => set_hashes(&mut c, hash, h),
+                    Err(e) => eprintln!("  {}: {e}", path.display()),
+                }
+            }
+            save(&mut c, &cache)?;
+        }
+        colls.push(c);
+    }
+    let refs: Vec<Option<&Collection>> = colls.iter().map(Some).collect();
+    let groups = find_groups(&refs, threshold, |_, _| false);
+    for (n, g) in groups.iter().enumerate() {
+        println!("group {} ({} files)", n + 1, g.len());
+        for (ci, hash) in g {
+            let Some(c) = colls.get(*ci) else { continue };
+            let Some(e) = c.get(hash) else { continue };
+            let shown = e.paths.first().and_then(|p| c.abs_path(p)).map_or_else(|| hash.clone(), |p| p.display().to_string());
+            let size = match (e.width, e.height) {
+                (Some(w), Some(h)) => format!("{w}x{h}, "),
+                _ => String::new(),
+            };
+            println!("  {shown}  ({size}{} bytes)", e.size);
+        }
+    }
+    eprintln!("{} group(s) of near-duplicates", groups.len());
     Ok(())
 }
 

@@ -2,7 +2,8 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **M3**: perceptual hashes (dHash, pHash), BK-tree, `dupes:` metatag, review screen.
+1. **M3**: duplicates review screen (M3.2), parent/child links (M3.3), pools (M3.4), stacks in
+   the grid (M3.5).
 2. **M4**: `notify` file watching, reload on outside changes to `collection.json` / `tags.json`,
    Tags screen, Unknown tags screen, rebuild from sidecars, saved searches, slideshow.
 3. **UI polish**: fullscreen viewer; a progress count during scans (now only a spinner); thumbnails

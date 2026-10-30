@@ -295,6 +295,15 @@ impl Collection {
         self.data.not_duplicates.contains(&pair)
     }
 
+    /// Records that two files aren't duplicates, so they are never grouped again.
+    pub fn mark_not_duplicate(&mut self, a: &str, b: &str) {
+        if a == b {
+            return;
+        }
+        let pair = if a <= b { [a.to_string(), b.to_string()] } else { [b.to_string(), a.to_string()] };
+        self.dirty |= self.data.not_duplicates.insert(pair);
+    }
+
     /// `path` relative to the root with `/` separators, if it is inside the collection.
     pub fn rel_path(&self, path: &Path) -> Option<String> {
         let rel = path.strip_prefix(&self.root).ok()?;

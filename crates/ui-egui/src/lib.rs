@@ -344,7 +344,7 @@ impl App {
                         rescan = Some(i);
                     }
                     if ui
-                        .add_enabled(!self.lib.is_scanning(), egui::Button::new("Close").small())
+                        .add_enabled(!self.lib.is_busy(), egui::Button::new("Close").small())
                         .on_hover_text("Stop showing this folder (nothing is deleted)")
                         .clicked()
                     {
@@ -372,6 +372,10 @@ impl App {
             if self.lib.is_scanning() {
                 ui.spinner();
                 ui.label("Scanning…");
+                ui.separator();
+            } else if let Some((done, total)) = self.lib.hash_progress() {
+                ui.spinner();
+                ui.label(format!("Looking for duplicates: {done} / {total}"));
                 ui.separator();
             }
             let loading = self.thumbs.loading();
@@ -743,7 +747,7 @@ impl App {
 
     /// Applies `--select` / `--view` and takes `--screenshot` once scanning is done.
     fn startup(&mut self, ctx: &egui::Context) {
-        if self.lib.is_scanning() {
+        if self.lib.is_busy() {
             return;
         }
         if !self.startup_done {
@@ -836,7 +840,7 @@ impl eframe::App for App {
         if let Some(wait) = self.lib.save_due() {
             ctx.request_repaint_after(wait);
         }
-        if self.lib.is_scanning() {
+        if self.lib.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }

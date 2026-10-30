@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 boorucraft-store = { workspace = true }
+boorucraft-dedup = { workspace = true }
 image = { workspace = true }
 jxl-oxide = { workspace = true }
 thiserror = { workspace = true }

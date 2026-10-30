@@ -121,3 +121,35 @@ fn info_and_unknown_tags() {
     assert!(e.ok(&["info", dir]).contains("files: 2"));
     assert!(e.fails(&["bogus"]).contains("usage"));
 }
+
+/// A real picture, `w` pixels wide: blocks of different shades and a bright disc at `x` (0..1).
+fn picture(path: &Path, w: u32, x: f32) {
+    let h = w * 2 / 3;
+    let shades = [30.0, 200.0, 90.0, 160.0, 60.0, 230.0, 120.0, 10.0, 180.0, 70.0, 140.0, 40.0];
+    let img = image::RgbImage::from_fn(w, h, |px, py| {
+        let (fx, fy) = (px as f32 / w as f32, py as f32 / h as f32);
+        let block = shades[(fx * 4.0) as usize % 4 + (fy * 3.0) as usize % 3 * 4];
+        let v = if (fx - x).powi(2) + (fy - 0.5).powi(2) < 0.03 { 250.0 } else { block * 0.8 + fx * 40.0 };
+        image::Rgb([v as u8, (v * 0.7) as u8, 80])
+    });
+    img.save(path).unwrap();
+}
+
+#[test]
+fn near_duplicates() {
+    let e = Env::new();
+    let dir = e.dir();
+    picture(&e.pics.path().join("big.png"), 600, 0.3);
+    picture(&e.pics.path().join("small.jpg"), 200, 0.3);
+    picture(&e.pics.path().join("other.png"), 600, 0.8);
+    e.ok(&["scan", dir]);
+    let out = e.ok(&["dupes", dir]);
+    assert!(out.contains("group 1 (2 files)") && !out.contains("group 2"), "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[1].contains("big.png") && lines[2].contains("small.jpg"), "the bigger copy first: {out}");
+    assert!(e.read("collection.json").contains("\"phash\""), "hashes are saved");
+    let mut found = names(&e.ok(&["search", dir, "dupes:yes"]));
+    found.sort();
+    assert_eq!(found, vec!["big.png", "small.jpg"]);
+    assert!(e.fails(&["dupes", dir, "--threshold", "99"]).contains("--threshold"));
+}

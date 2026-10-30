@@ -178,6 +178,8 @@ pub enum TermKind {
     Kind(Vec<String>),
     Animated(bool),
     Missing(bool),
+    /// Has (or hasn't) a near-duplicate in the open collections.
+    Dupes(bool),
     /// Any of the file's paths.
     Path(TextMatch),
     Md5(String),
@@ -408,7 +410,7 @@ fn parse_metatag(name: &str, value: &str) -> Result<TermKind, String> {
         }
         "animated" => Ok(TermKind::Animated(parse_bool(&lower).ok_or_else(|| bad(name))?)),
         "missing" => Ok(TermKind::Missing(parse_bool(&lower).ok_or_else(|| bad(name))?)),
-        "dupes" => Err("`dupes:` searches arrive with duplicate detection".into()),
+        "dupes" => Ok(TermKind::Dupes(parse_bool(&lower).ok_or_else(|| bad(name))?)),
         "path" => Ok(TermKind::Path(text_match(&lower))),
         "source" if lower == "none" => Ok(TermKind::Source(None)),
         "source" => Ok(TermKind::Source(Some(text_match(&lower)))),
@@ -455,6 +457,7 @@ pub const METATAG_HELP: &[(&str, &str)] = &[
     ("tagcount", "tagcount:0"),
     ("path", "path:\"holiday 2023\""),
     ("missing", "missing:yes"),
+    ("dupes", "dupes:yes"),
     ("source", "source:none or source:*pixiv*"),
     ("md5", "md5:<32 hex digits>"),
     ("hash", "hash:3fa9"),
@@ -466,7 +469,7 @@ pub fn metatag_values(name: &str) -> &'static [&'static str] {
     match name {
         "rating" => &["s", "q", "e", "s,q", "q,e"],
         "kind" => &["image", "video", "other"],
-        "animated" | "missing" => &["yes", "no"],
+        "animated" | "missing" | "dupes" => &["yes", "no"],
         "type" => &["jpeg", "png", "gif", "webp", "jxl", "avif", "heic", "mp4", "webm", "mkv"],
         "ratio" => &["16:9", "4:3", "3:2", "1:1", "9:16", ">1", "<1"],
         "tagcount" => &["0", ">10"],
@@ -766,13 +769,14 @@ mod tests {
         assert_eq!(one("kind:video,image"), TermKind::Kind(vec!["video".into(), "image".into()]));
         assert_eq!(one("animated:yes"), TermKind::Animated(true));
         assert_eq!(one("missing:no"), TermKind::Missing(false));
+        assert_eq!(one("dupes:yes"), TermKind::Dupes(true));
         assert_eq!(one("path:\"Holiday 2023\""), TermKind::Path(TextMatch::Contains("holiday 2023".into())));
         assert_eq!(one("path:*/2023/*"), TermKind::Path(TextMatch::Glob("*/2023/*".into())));
         assert_eq!(one("source:none"), TermKind::Source(None));
         assert_eq!(one("source:*pixiv*"), TermKind::Source(Some(TextMatch::Glob("*pixiv*".into()))));
         assert_eq!(one("hash:3FA9"), TermKind::Hash("3fa9".into()));
         assert!(matches!(one("md5:0123456789abcdef0123456789ABCDEF"), TermKind::Md5(_)));
-        for bad in ["kind:sound", "animated:maybe", "md5:abc", "hash:xyz1", "type:p.ng", "dupes:yes", "path:", "path:\"\""] {
+        for bad in ["kind:sound", "animated:maybe", "md5:abc", "hash:xyz1", "type:p.ng", "dupes:maybe", "path:", "path:\"\""] {
             assert!(Query::parse(bad).is_err(), "{bad}");
         }
         assert!(TextMatch::Glob("*/2023/*".into()).matches("trips/2023/a.jpg"));
@@ -832,9 +836,7 @@ mod tests {
     #[test]
     fn every_metatag_has_help() {
         for name in crate::METATAGS {
-            if *name != "dupes" {
-                assert!(!example(name).is_empty(), "{name}");
-            }
+            assert!(!example(name).is_empty(), "{name}");
         }
     }
 }

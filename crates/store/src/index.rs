@@ -5,13 +5,21 @@
 //! ANDs, ORs and subtractions; metatags scan the rows.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use boorucraft_core::{DateField, Mode, NumField, Order, OrderKey, Query, Rating, TagPattern, TermKind, glob_match};
 use chrono::{DateTime, Utc};
 use roaring::RoaringBitmap;
 
 use crate::{Collection, FileEntry, Kind};
+
+/// Facts that depend on more than one file, possibly in other collections, worked out by the
+/// caller (duplicate detection lives outside the store).
+#[derive(Debug, Clone, Default)]
+pub struct Links {
+    /// Hashes of files that have a near-duplicate.
+    pub dupes: HashSet<String>,
+}
 
 /// The searchable and sortable columns of one file.
 #[derive(Debug, Clone)]
@@ -75,7 +83,7 @@ impl Row {
     }
 
     /// Does this row match a metatag? (Tags and ratings use bitmaps instead.)
-    fn matches(&self, kind: &TermKind, now: DateTime<Utc>) -> bool {
+    fn matches(&self, kind: &TermKind, now: DateTime<Utc>, links: &Links) -> bool {
         match kind {
             TermKind::Tag(_) | TermKind::Rating(_) => false,
             TermKind::Number(field, range) => self.number(*field).is_some_and(|v| range.contains(v)),
@@ -98,6 +106,7 @@ impl Row {
             }
             TermKind::Animated(want) => self.animated == *want,
             TermKind::Missing(want) => self.missing == *want,
+            TermKind::Dupes(want) => links.dupes.contains(&self.hash) == *want,
             TermKind::Path(m) => self.paths.iter().any(|p| m.matches(p)),
             TermKind::Md5(m) => self.md5 == *m,
             TermKind::Hash(prefix) => self.hash.starts_with(prefix.as_str()),
@@ -196,7 +205,7 @@ impl SearchIndex {
         out
     }
 
-    fn term_set(&self, kind: &TermKind, now: DateTime<Utc>) -> RoaringBitmap {
+    fn term_set(&self, kind: &TermKind, now: DateTime<Utc>, links: &Links) -> RoaringBitmap {
         match kind {
             TermKind::Tag(TagPattern::Exact(t)) => self.tags.get(t).cloned().unwrap_or_default(),
             TermKind::Tag(TagPattern::Wildcard(p)) => {
@@ -217,17 +226,17 @@ impl SearchIndex {
                 }
                 set
             }
-            other => (0u32..).zip(&self.rows).filter(|(_, row)| row.matches(other, now)).map(|(id, _)| id).collect(),
+            other => (0u32..).zip(&self.rows).filter(|(_, row)| row.matches(other, now, links)).map(|(id, _)| id).collect(),
         }
     }
 
     /// The rows matching a query, unsorted (sort them with [`compare_rows`]).
-    pub fn matching_rows(&self, query: &Query, now: DateTime<Utc>) -> Vec<&Row> {
+    pub fn matching_rows(&self, query: &Query, now: DateTime<Utc>, links: &Links) -> Vec<&Row> {
         let mut must: Option<RoaringBitmap> = None;
         let mut any: Option<RoaringBitmap> = None;
         let mut not = RoaringBitmap::new();
         for term in &query.terms {
-            let set = self.term_set(&term.kind, now);
+            let set = self.term_set(&term.kind, now, links);
             match term.mode {
                 Mode::Must => must = Some(must.map_or(set.clone(), |m| m & &set)),
                 Mode::Any => any = Some(any.map_or(set.clone(), |a| a | &set)),
@@ -243,15 +252,15 @@ impl SearchIndex {
     }
 
     /// Hashes of the matching files in the query's order (default: newest imported first).
-    pub fn search_at(&self, query: &Query, now: DateTime<Utc>) -> Vec<&str> {
-        let mut rows = self.matching_rows(query, now);
+    pub fn search_at(&self, query: &Query, now: DateTime<Utc>, links: &Links) -> Vec<&str> {
+        let mut rows = self.matching_rows(query, now, links);
         rows.sort_by(|a, b| compare_rows(query.order.as_ref(), query.seed, a, b));
         rows.into_iter().map(|r| r.hash.as_str()).collect()
     }
 
     /// [`Self::search_at`] now.
-    pub fn search(&self, query: &Query) -> Vec<&str> {
-        self.search_at(query, Utc::now())
+    pub fn search(&self, query: &Query, links: &Links) -> Vec<&str> {
+        self.search_at(query, Utc::now(), links)
     }
 
     /// Number of files with each rating.
@@ -340,7 +349,8 @@ mod tests {
     }
 
     fn search<'a>(i: &'a SearchIndex, q: &str) -> Vec<&'a str> {
-        i.search_at(&Query::parse(q).unwrap(), day(200))
+        let links = Links { dupes: ["a1a1".to_string(), "c3c3".to_string()].into() };
+        i.search_at(&Query::parse(q).unwrap(), day(200), &links)
     }
 
     #[test]
@@ -393,6 +403,8 @@ mod tests {
         assert_eq!(search(&i, "imported:<90d"), vec!["e5e5", "d4d4"]);
         assert_eq!(search(&i, "imported:>100d"), vec!["c3c3", "b2b2", "a1a1"]);
         assert_eq!(search(&i, "~kind:video ~animated:yes"), vec!["d4d4", "c3c3"]);
+        assert_eq!(search(&i, "dupes:yes"), vec!["c3c3", "a1a1"]);
+        assert_eq!(search(&i, "dupes:no"), vec!["e5e5", "d4d4", "b2b2"]);
     }
 
     #[test]
@@ -411,7 +423,7 @@ mod tests {
         let shuffled = |seed| {
             let mut q = Query::parse("order:random").unwrap();
             q.seed = seed;
-            i.search_at(&q, day(0)).into_iter().map(str::to_string).collect::<Vec<_>>()
+            i.search_at(&q, day(0), &Links::default()).into_iter().map(str::to_string).collect::<Vec<_>>()
         };
         assert_eq!(shuffled(1), shuffled(1), "same seed, same order");
         assert!((2..20).any(|s| shuffled(s) != shuffled(1)), "seeds change the order");

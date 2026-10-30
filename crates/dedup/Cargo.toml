@@ -1,0 +1,13 @@
+[package]
+name = "boorucraft-dedup"
+description = "Near-duplicate detection: perceptual hashes, a BK-tree and duplicate groups"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

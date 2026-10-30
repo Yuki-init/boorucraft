@@ -21,6 +21,8 @@ use image::codecs::webp::WebPDecoder;
 use image::{AnimationDecoder, DynamicImage, ImageFormat, ImageReader, Limits, RgbaImage};
 use thiserror::Error;
 
+pub use boorucraft_dedup::Hashes;
+
 /// Long side of a thumbnail, in pixels.
 pub const THUMB_SIZE: u32 = 320;
 /// Largest picture side we decode.
@@ -174,6 +176,14 @@ impl ThumbCache {
             .find_map(|p| decode(&p, if p.extension()? == "jpg" { "jpeg" } else { "png" }).ok().map(|i| i.into_rgba8()))
     }
 
+    /// The thumbnail (cached or made now) and the perceptual hashes computed from it. Hashing
+    /// the thumbnail rather than the full picture means a cached thumbnail needs no decoding.
+    pub fn thumbnail_and_hashes(&self, hash: &str, source: &Path, format: &str) -> Result<(RgbaImage, Hashes), ThumbError> {
+        let thumb = self.get_or_make(hash, source, format)?;
+        let hashes = perceptual(&thumb).ok_or_else(|| ThumbError::Decode(source.to_path_buf(), "picture is empty".into()))?;
+        Ok((thumb, hashes))
+    }
+
     /// The cached thumbnail, or a new one made from `source` and stored.
     pub fn get_or_make(&self, hash: &str, source: &Path, format: &str) -> Result<RgbaImage, ThumbError> {
         if let Some(t) = self.load(hash) {
@@ -203,6 +213,26 @@ impl ThumbCache {
         }
         std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
     }
+}
+
+/// dHash and pHash of a picture (best given a thumbnail: it is scaled down to 32×32 anyway).
+/// Transparent parts count as mid-grey, so the colour hidden under them doesn't matter.
+pub fn perceptual(img: &RgbaImage) -> Option<Hashes> {
+    if img.width() == 0 || img.height() == 0 {
+        return None;
+    }
+    let gray = image::GrayImage::from_fn(img.width(), img.height(), |x, y| {
+        let [r, g, b, a] = img.get_pixel(x, y).0;
+        let luma = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
+        let alpha = f32::from(a) / 255.0;
+        image::Luma([(luma * alpha + 128.0 * (1.0 - alpha)).round().clamp(0.0, 255.0) as u8])
+    });
+    let grid = |w: usize, h: usize| -> Vec<f32> {
+        image::imageops::resize(&gray, w as u32, h as u32, image::imageops::FilterType::Triangle).pixels().map(|p| f32::from(p.0[0])).collect()
+    };
+    let (dw, dh) = boorucraft_dedup::DHASH_SIZE;
+    let n = boorucraft_dedup::PHASH_SIZE;
+    Some(Hashes { dhash: boorucraft_dedup::dhash(&grid(dw, dh))?, phash: boorucraft_dedup::phash(&grid(n, n))? })
 }
 
 /// Scales a picture down to fit [`THUMB_SIZE`] (never up).
@@ -251,6 +281,27 @@ mod tests {
         assert_eq!(cache.get_or_make(&h2, &src2, "png").unwrap().dimensions(), (10, 10), "never scaled up");
         assert!(dir.path().join("cache/thumbs/cd").join(format!("{h2}.png")).exists(), "transparent → png");
         assert!(cache.load("../../etc").is_none());
+    }
+
+    #[test]
+    fn resized_copies_have_close_hashes() {
+        let pattern = |w: u32, h: u32| {
+            RgbaImage::from_fn(w, h, |x, y| {
+                let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+                let v = if (fx - 0.3).powi(2) + (fy - 0.5).powi(2) < 0.04 { 230.0 } else { fx * 120.0 + fy * 60.0 };
+                image::Rgba([v as u8, (v * 0.8) as u8, 90, 255])
+            })
+        };
+        let a = perceptual(&make_thumbnail(&DynamicImage::ImageRgba8(pattern(1200, 800)))).unwrap();
+        let b = perceptual(&make_thumbnail(&DynamicImage::ImageRgba8(pattern(450, 300)))).unwrap();
+        let other = perceptual(&image::imageops::flip_horizontal(&pattern(450, 300))).unwrap();
+        let d = |x: u64, y: u64| boorucraft_dedup::distance(x, y);
+        assert!(d(a.dhash, b.dhash) <= 4 && d(a.phash, b.phash) <= 4, "{a:?} {b:?}");
+        assert!(d(a.phash, other.phash) > 8, "a different picture");
+        // Fully transparent pixels hash the same whatever colour they hide.
+        let clear = |c: u8| RgbaImage::from_pixel(8, 8, image::Rgba([c, c, c, 0]));
+        assert_eq!(perceptual(&clear(0)), perceptual(&clear(255)));
+        assert_eq!(perceptual(&RgbaImage::new(0, 0)), None);
     }
 
     #[test]

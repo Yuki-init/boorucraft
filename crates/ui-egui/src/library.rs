@@ -1,15 +1,19 @@
 //! Everything the window shows, without egui: the tag list, the open collections, background
 //! scans, searches across collections, edits and debounced saves.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use boorucraft_core::{Query, Rating};
-use boorucraft_index::{ScanCache, ScanReport, SidecarReport, scan, write_sidecars};
-use boorucraft_store::{Collection, FileEntry, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
+use boorucraft_dedup::Hashes;
+use boorucraft_index::{ScanCache, ScanReport, SidecarReport, find_groups, needing_hashes, scan, set_hashes, write_sidecars};
+use boorucraft_store::{Collection, FileEntry, Links, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
+use boorucraft_thumbs::ThumbCache;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// How long after the last edit collection.json and the sidecars are saved.
@@ -39,6 +43,9 @@ pub struct Config {
     pub collections: Vec<PathBuf>,
     #[serde(default)]
     pub tile_size: Option<f32>,
+    /// Most bits two perceptual hashes may differ by for near-duplicates (default 6).
+    #[serde(default)]
+    pub dupe_threshold: Option<u32>,
 }
 
 impl Config {
@@ -104,6 +111,18 @@ impl OpenCollection {
     }
 }
 
+enum HashMsg {
+    One { coll: usize, hash: String, result: Result<Hashes, String> },
+    Finished,
+}
+
+/// The background job that computes perceptual hashes for pictures that have none.
+struct HashJob {
+    total: usize,
+    done: usize,
+    cancel: Arc<AtomicBool>,
+}
+
 struct ScanDone {
     coll: usize,
     c: Box<Collection>,
@@ -130,6 +149,17 @@ pub struct Library {
     usage: Option<Vec<(String, u64)>>,
     /// Shuffles `order:random`; fixed for the session so results don't jump around.
     seed: u64,
+    /// Near-duplicate groups over the open collections, best copy first.
+    pub dupe_groups: Vec<Vec<Hit>>,
+    /// The groups need working out again (after scans, hashing or decisions).
+    dupes_stale: bool,
+    links: Links,
+    hash_job: Option<HashJob>,
+    /// Pictures that couldn't be hashed this session (not retried until restart).
+    hash_failed: HashSet<String>,
+    hash_tx: Sender<HashMsg>,
+    hash_rx: Receiver<HashMsg>,
+    thumb_cache: ThumbCache,
     scan_tx: Sender<ScanDone>,
     scan_rx: Receiver<ScanDone>,
     /// Called when a background job finishes, to wake the UI.
@@ -148,6 +178,7 @@ fn name_of(root: &Path) -> String {
 impl Library {
     pub fn new(dirs: Dirs, config: Config, session_collections: Option<Vec<PathBuf>>, waker: Arc<dyn Fn() + Send + Sync>) -> Library {
         let (scan_tx, scan_rx) = channel();
+        let (hash_tx, hash_rx) = channel();
         let mut messages = Vec::new();
         let path = dirs.tags.clone();
         let tags = match TagList::open(&path) {
@@ -167,7 +198,7 @@ impl Library {
             tags,
             colls: Vec::new(),
             config,
-            dirs,
+            dirs: dirs.clone(),
             session_only,
             hits: Vec::new(),
             query_error: None,
@@ -176,6 +207,14 @@ impl Library {
             result_ratings: [0; 4],
             usage: None,
             seed: seed_now(),
+            dupe_groups: Vec::new(),
+            dupes_stale: true,
+            links: Links::default(),
+            hash_job: None,
+            hash_failed: HashSet::new(),
+            hash_tx,
+            hash_rx,
+            thumb_cache: ThumbCache::new(&dirs.cache),
             scan_tx,
             scan_rx,
             waker,
@@ -227,6 +266,7 @@ impl Library {
                 }
                 self.colls.push(oc);
                 self.usage = None;
+                self.dupes_stale = true;
                 (None, root)
             }
             Err(e) => (Some(e.to_string()), root.to_path_buf()),
@@ -254,14 +294,15 @@ impl Library {
     }
 
     pub fn close_collection(&mut self, idx: usize) {
-        // Scan threads report back by index, so indexes must not shift while any runs.
-        if self.is_scanning() {
-            self.notify("Wait for scanning to finish before closing a collection");
+        // Background jobs report back by index, so indexes must not shift while any runs.
+        if self.is_busy() {
+            self.notify("Wait for scanning and duplicate checks to finish before closing a collection");
             return;
         }
         self.flush(idx);
         let oc = self.colls.remove(idx);
         self.usage = None;
+        self.dupes_stale = true;
         self.config.collections.retain(|p| *p != oc.root);
         if !self.session_only {
             self.save_config();
@@ -313,7 +354,115 @@ impl Library {
         self.colls.iter().any(|c| matches!(c.state, CollState::Scanning))
     }
 
-    /// Takes finished scans back. Returns true if anything changed.
+    /// A scan or the hashing job is running.
+    pub fn is_busy(&self) -> bool {
+        self.is_scanning() || self.hash_job.is_some()
+    }
+
+    /// Hashing progress: (done, total), while the job runs.
+    pub fn hash_progress(&self) -> Option<(usize, usize)> {
+        self.hash_job.as_ref().map(|j| (j.done, j.total))
+    }
+
+    /// Starts hashing pictures that have no perceptual hashes yet, if there are any and nothing
+    /// else is running.
+    fn start_hashing(&mut self) {
+        if self.is_busy() {
+            return;
+        }
+        let mut jobs: Vec<(usize, String, PathBuf, String)> = Vec::new();
+        for (i, oc) in self.colls.iter().enumerate() {
+            let Some(c) = oc.collection() else { continue };
+            if c.is_read_only() {
+                continue;
+            }
+            for (hash, path, format) in needing_hashes(c) {
+                if boorucraft_thumbs::can_decode(&format) && !self.hash_failed.contains(&hash) {
+                    jobs.push((i, hash, path, format));
+                }
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, cache, waker, stop) = (self.hash_tx.clone(), self.thumb_cache.clone(), Arc::clone(&self.waker), Arc::clone(&cancel));
+        let total = jobs.len();
+        let spawned = std::thread::Builder::new().name("hashing".into()).spawn(move || {
+            jobs.par_iter().for_each(|(coll, hash, path, format)| {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let result = cache.thumbnail_and_hashes(hash, path, format).map(|(_, h)| h).map_err(|e| e.to_string());
+                let _ = tx.send(HashMsg::One { coll: *coll, hash: hash.clone(), result });
+            });
+            let _ = tx.send(HashMsg::Finished);
+            waker();
+        });
+        match spawned {
+            Ok(_) => self.hash_job = Some(HashJob { total, done: 0, cancel }),
+            Err(e) => self.notify(format!("Couldn't start looking for duplicates: {e}")),
+        }
+    }
+
+    /// Takes in finished perceptual hashes. Returns true when the job finished.
+    fn poll_hashes(&mut self) -> bool {
+        let mut finished = false;
+        let mut touched: BTreeSet<usize> = BTreeSet::new();
+        while let Ok(msg) = self.hash_rx.try_recv() {
+            match msg {
+                HashMsg::One { coll, hash, result } => {
+                    if let Some(job) = &mut self.hash_job {
+                        job.done += 1;
+                    }
+                    match result {
+                        Ok(h) => {
+                            // The collection may be rescanning now; then the hash comes next time.
+                            if let Some(oc) = self.colls.get_mut(coll)
+                                && let CollState::Ready { c, .. } = &mut oc.state
+                            {
+                                set_hashes(c, &hash, h);
+                                touched.insert(coll);
+                            }
+                        }
+                        Err(_) => {
+                            self.hash_failed.insert(hash);
+                        }
+                    }
+                }
+                HashMsg::Finished => {
+                    self.hash_job = None;
+                    self.dupes_stale = true;
+                    finished = true;
+                }
+            }
+        }
+        for coll in touched {
+            // Saved with the next debounced save; no sidecar change.
+            if let Some(oc) = self.colls.get_mut(coll)
+                && oc.dirty_since.is_none()
+            {
+                oc.dirty_since = Some(Instant::now());
+            }
+        }
+        finished
+    }
+
+    /// Works the duplicate groups out again if anything changed since.
+    pub fn refresh_dupes(&mut self) {
+        if !self.dupes_stale {
+            return;
+        }
+        self.dupes_stale = false;
+        let colls: Vec<Option<&Collection>> = self.colls.iter().map(OpenCollection::collection).collect();
+        let threshold = self.config.dupe_threshold.unwrap_or(boorucraft_dedup::DEFAULT_THRESHOLD);
+        let groups = find_groups(&colls, threshold, |_, _| false);
+        self.links.dupes = groups.iter().flatten().map(|(_, h)| h.clone()).collect();
+        self.dupe_groups = groups.into_iter().map(|g| g.into_iter().map(|(coll, hash)| Hit { coll, hash }).collect()).collect();
+    }
+
+    /// Takes finished scans and hashing back, and starts hashing new pictures. Returns true if
+    /// the results may have changed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         while let Ok(done) = self.scan_rx.try_recv() {
@@ -328,6 +477,7 @@ impl Library {
                 let Some(oc) = self.colls.get_mut(coll) else { continue };
                 oc.index = SearchIndex::build(&c);
                 self.usage = None;
+                self.dupes_stale = true;
                 oc.state = CollState::Ready { c, cache };
                 oc.last_report = Some(summary);
                 name = oc.name.clone();
@@ -338,6 +488,12 @@ impl Library {
             if let Some(e) = save_err {
                 self.notify(format!("{name}: couldn't save: {e}"));
             }
+        }
+        if self.poll_hashes() {
+            changed = true;
+        }
+        if !self.is_busy() {
+            self.start_hashing();
         }
         changed
     }
@@ -356,11 +512,12 @@ impl Library {
             }
         };
         query.seed = self.seed;
+        self.refresh_dupes();
         let now = chrono::Utc::now();
         let mut rows: Vec<(usize, &Row)> = Vec::new();
         for (i, oc) in self.colls.iter().enumerate() {
             if oc.collection().is_some() {
-                rows.extend(oc.index.matching_rows(&query, now).into_iter().map(|r| (i, r)));
+                rows.extend(oc.index.matching_rows(&query, now, &self.links).into_iter().map(|r| (i, r)));
             }
         }
         rows.sort_by(|a, b| compare_rows(query.order.as_ref(), query.seed, a.1, b.1).then(a.0.cmp(&b.0)));
@@ -595,6 +752,14 @@ impl Library {
     }
 }
 
+impl Drop for Library {
+    fn drop(&mut self) {
+        if let Some(job) = &self.hash_job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +767,42 @@ mod tests {
     fn picture(path: &Path, shade: u8) {
         let img = image::RgbaImage::from_pixel(8, 6, image::Rgba([shade, 40, 90, 255]));
         img.save_with_format(path, image::ImageFormat::Png).unwrap();
+    }
+
+    /// A picture with some structure, `w` wide: shaded blocks, a gradient and a bright disc at
+    /// `x` (0..1).
+    fn detailed(path: &Path, w: u32, x: f32) {
+        let h = w * 2 / 3;
+        let shades = [30.0, 200.0, 90.0, 160.0, 60.0, 230.0, 120.0, 10.0, 180.0, 70.0, 140.0, 40.0];
+        let img = image::RgbImage::from_fn(w, h, |px, py| {
+            let (fx, fy) = (px as f32 / w as f32, py as f32 / h as f32);
+            let block = shades[(fx * 4.0) as usize % 4 + (fy * 3.0) as usize % 3 * 4];
+            let v: f32 = if (fx - x).powi(2) + (fy - 0.5).powi(2) < 0.03 { 250.0 } else { block * 0.8 + fx * 40.0 };
+            image::Rgb([v as u8, (v * 0.7) as u8, 80])
+        });
+        img.save(path).unwrap();
+    }
+
+    #[test]
+    fn near_duplicates_are_found_in_the_background() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (one, two) = (tmp.path().join("one"), tmp.path().join("two"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        detailed(&one.join("big.png"), 600, 0.3);
+        detailed(&two.join("small.jpg"), 200, 0.3);
+        detailed(&one.join("other.png"), 600, 0.8);
+        let mut lib = libraries(tmp.path(), &[&one, &two]);
+        assert!(lib.hash_progress().is_none(), "the job finished");
+        lib.search("dupes:yes");
+        assert_eq!(lib.hits.len(), 2);
+        assert_eq!(lib.dupe_groups.len(), 1);
+        let best = &lib.dupe_groups[0][0];
+        assert_eq!(lib.entry(best).unwrap().width, Some(600), "the bigger copy first");
+        lib.search("dupes:no");
+        assert_eq!(lib.hits.len(), 1);
+        lib.flush_all();
+        assert!(std::fs::read_to_string(two.join("collection.json")).unwrap().contains("\"phash\""), "hashes are saved");
     }
 
     fn library(tmp: &Path, pics: &Path) -> Library {
@@ -612,7 +813,8 @@ mod tests {
         let dirs = Dirs { config: tmp.join("cfg"), cache: tmp.join("cache"), tags: tmp.join("cfg/tags.json") };
         let mut lib = Library::new(dirs, Config::default(), Some(pics.iter().map(|p| p.to_path_buf()).collect()), Arc::new(|| {}));
         let start = Instant::now();
-        while lib.is_scanning() {
+        lib.poll();
+        while lib.is_busy() {
             assert!(start.elapsed() < Duration::from_secs(20), "scan never finished");
             lib.poll();
             std::thread::sleep(Duration::from_millis(5));

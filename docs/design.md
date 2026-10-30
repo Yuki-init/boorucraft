@@ -56,14 +56,14 @@ crates/
   xmp/       reading and updating XMP sidecars without losing other apps' data
   index/     folder scanning, hashing, metadata, sidecar sync
   thumbs/    decoding pictures (Rust decoders only), thumbnail cache
-  dedup/     perceptual hashes, BK-tree, duplicate groups (M3)
+  dedup/     perceptual hashes, BK-tree, grouping (pure functions, no IO)
   ui-egui/   search bar, grid, viewer, tag editor, duplicates view
 apps/
   boorucraft/      the desktop app
   boorucraft-cli/  headless scan / search / tag / dupes, for tests and scripting
 ```
 
-Dependencies only point downwards: `core` <- `store`, `xmp` <- `index`, `thumbs`, `dedup` <- `ui-egui` <- apps.
+Dependencies only point downwards: `core` <- `store`, `xmp`, `dedup` <- `index`, `thumbs` <- `ui-egui` <- apps.
 
 ## Central tag list (D4b)
 
@@ -291,7 +291,7 @@ container crates. Playback would still go to the system player.
 | `source:none` `source:*pixiv*` | no source / source matches |
 | `md5:…` `hash:3fa9` | exact MD5 (32 hex digits) / SHA-256 prefix (4+ digits) |
 | `missing:yes` | the file wasn't found in the last scan |
-| `dupes:yes` | has a near-duplicate (M3) |
+| `dupes:yes` `dupes:no` | has a near-duplicate in the open collections |
 | `order:date` `order:-date` `order:filesize` `order:name` `order:random` | sort order, one per search |
 
 Values with spaces go in double quotes. Calendar dates are in UTC, the same way EXIF times are
@@ -316,9 +316,17 @@ their namespace colour; then metatag names with an example, and values after `ra
 
 - **Exact**: same SHA-256, including the same picture in two open collections. One entry with
   several paths inside a collection.
-- **Near**: dHash and pHash (64 bits each) from the decoded image. Two pictures are candidates if
-  both distances are at most a threshold (default 8, adjustable). Candidates are found with a
-  BK-tree built in memory when a collection is opened.
+- **Near**: dHash (9×8 grid) and pHash (low 8×8 DCT frequencies of a 32×32 grid), 64 bits each,
+  computed from the thumbnail (so a cached thumbnail needs no decoding; transparent parts count
+  as mid-grey) and stored in `collection.json`. Two pictures are joined if both distances are at
+  most a threshold: default 6, adjustable. Tried on a copy of the sample photos: resized and
+  re-encoded copies differ by 0–3 bits, while two unrelated wallpapers with flat backgrounds
+  and one object in the middle differed by 6 and 8, so 8 was too loose. Candidates come from a
+  BK-tree over the dHashes; groups are joined transitively (union-find) and list the best copy
+  first (most pixels, then biggest file, then imported first).
+- **When**: after scans finish, a background job hashes every decodable picture that has no
+  hashes yet (status bar: "Looking for duplicates: n / total"). A picture that fails isn't
+  retried until the next start. `boorucraft-cli dupes DIR…` does the same and prints the groups.
 - **Review screen**: groups shown side by side with resolution, size, format and paths.
   Actions: keep the best one (move the others to the system trash with the `trash` crate, only
   after confirmation), merge tags into the one kept, or mark "not duplicates" (saved in

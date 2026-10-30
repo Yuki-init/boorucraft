@@ -185,3 +185,41 @@ fn foreign_sidecars_add_tags_and_damaged_ones_are_left_alone() {
     assert_eq!(report.written, 0);
     assert_eq!(fs::read(root.join("b.png.xmp")).unwrap(), b"<broken");
 }
+
+#[test]
+fn duplicate_groups_span_collections() {
+    use crate::{find_groups, needing_hashes, set_hashes};
+    use boorucraft_dedup::Hashes;
+    use boorucraft_store::FileEntry;
+    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut one = Collection::open(d1.path()).unwrap();
+    let mut two = Collection::open(d2.path()).unwrap();
+    let add = |c: &mut Collection, hash: &str, w: u32, h: Option<Hashes>| {
+        let mut e = FileEntry::new("m".into(), Kind::Image, "png".into(), u64::from(w));
+        (e.width, e.height) = (Some(w), Some(w));
+        e.paths.insert(format!("{hash}.png"));
+        c.insert(hash.into(), e);
+        if let Some(h) = h {
+            set_hashes(c, hash, h);
+        }
+    };
+    let h = |d: u64, p: u64| Some(Hashes { dhash: d, phash: p });
+    add(&mut one, "aa", 100, h(0, 0));
+    add(&mut one, "bb", 400, h(1, 1));
+    add(&mut one, "cc", 100, h(u64::MAX, u64::MAX));
+    add(&mut one, "nohash", 100, None);
+    add(&mut two, "dd", 200, h(3, 0));
+    add(&mut two, "ee", 100, h(u64::MAX, u64::MAX - 1));
+    let none = |_: &(usize, String), _: &(usize, String)| false;
+    let groups = find_groups(&[Some(&one), None, Some(&two)], 8, none);
+    let m = |c: usize, h: &str| (c, h.to_string());
+    assert_eq!(groups, vec![vec![m(0, "bb"), m(2, "dd"), m(0, "aa")], vec![m(0, "cc"), m(2, "ee")]], "the biggest picture first");
+
+    two.mark_not_duplicate("ee", "cc");
+    one.get_mut("aa").unwrap().missing = true;
+    let groups = find_groups(&[Some(&one), None, Some(&two)], 8, none);
+    assert_eq!(groups, vec![vec![m(0, "bb"), m(2, "dd")]], "missing files and decided pairs are left out");
+    let related = |a: &(usize, String), b: &(usize, String)| a.1 == "bb" || b.1 == "bb";
+    assert!(find_groups(&[Some(&one), None, Some(&two)], 8, related).is_empty());
+    assert!(needing_hashes(&one).is_empty(), "files that aren't on disk can't be hashed");
+}

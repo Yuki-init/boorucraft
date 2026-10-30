@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 /// Layer of every workspace crate. A crate may depend only on crates in lower layers.
-/// L0 core → L1 store, xmp → L2 index → L3 UI → L4 apps.
+/// L0 core → L1 store, xmp, dedup → L2 index, thumbs → L3 UI → L4 apps.
 #[rustfmt::skip]
 const LAYERS: &[(&str, u8)] = &[
     ("boorucraft-core", 0),
     ("boorucraft-store", 1),
     ("boorucraft-xmp", 1),
+    ("boorucraft-dedup", 1),
     ("boorucraft-index", 2),
     ("boorucraft-thumbs", 2),
     ("boorucraft-ui-egui", 3),
