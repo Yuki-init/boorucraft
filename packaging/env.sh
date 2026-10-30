@@ -5,7 +5,7 @@
 #
 # Exports:
 #   ROOT                     workspace root
-#   VERSION                  [workspace.package] version from Cargo.toml (override: BOORUCRAFT_VERSION)
+#   VERSION                  [workspace.package] version from Cargo.toml (overrides: BOORUCRAFT_VERSION, VERSION)
 #   APP_ID                   reverse-DNS id: .desktop file, icon name, Wayland app id, Flatpak id
 #   DIST                     output directory for release files (default: $ROOT/dist/release)
 #   BOORUCRAFT_BUILD_SHA     git commit being packaged
@@ -26,7 +26,9 @@ workspace_version() {
   return 0
 }
 
-VERSION="${BOORUCRAFT_VERSION:-$(workspace_version)}"
+# CI's release jobs pass the resolved version in VERSION; some (Flatpak) don't apply a test run's
+# override to Cargo.toml, so it wins here.
+VERSION="${BOORUCRAFT_VERSION:-${VERSION:-$(workspace_version)}}"
 if [[ -z "$VERSION" ]]; then
   echo "error: could not read [workspace.package] version from $ROOT/Cargo.toml" >&2
   exit 1

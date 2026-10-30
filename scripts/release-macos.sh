@@ -26,7 +26,9 @@ for tool in git gh cargo rustup lipo hdiutil codesign; do
   command -v "$tool" >/dev/null || fail "$tool not found"
 done
 
-VERSION="${1:-$(. "$ROOT/packaging/env.sh" >/dev/null && echo "$VERSION")}"
+# Cargo.toml's version in a checkout (env.sh would also honour a VERSION already set).
+cargo_version() { (unset VERSION BOORUCRAFT_VERSION; . "$1/packaging/env.sh" >/dev/null && echo "$VERSION"); }
+VERSION="${1:-$(cargo_version "$ROOT")}"
 TAG="v$VERSION"
 
 # The draft must exist: the Release workflow makes it.
@@ -45,7 +47,7 @@ git -C "$ROOT" worktree add -q --detach "$WORK/src" "$COMMIT"
 
 cd "$WORK/src"
 # A test run's version override (CI applies it the same way); then the build matches the draft.
-if [[ "$(. packaging/env.sh >/dev/null && echo "$VERSION")" != "$VERSION" ]]; then
+if [[ "$(cargo_version .)" != "$VERSION" ]]; then
   cargo xtask version set "$VERSION"
 fi
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
