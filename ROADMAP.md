@@ -157,3 +157,6 @@ aliases and implications, watches folders for outside changes, and shows video t
   adds it to the draft. Fixed the Windows build (trash needs a COM threading feature).
 - 2026-10-30 — R3.4: releases skip FreeBSD, web and 32-bit Windows (no users to justify the
   build minutes), nor riscv64: Linux x86_64/aarch64, Windows x64/arm64, macOS universal.
+- 2026-10-30 — Published v0.1.0-rc.1 as a pre-release for testing (Linux and Windows; macOS to be
+  added from a Mac). R3.8: pre-release Arch packages get a version the suite's arch-package
+  action can read (0.1.0rc1) instead of 0.0.0; rc.1's were rebuilt the same way by hand.

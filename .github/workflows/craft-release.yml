@@ -5,7 +5,8 @@
 #     DMG on a Mac and uploads it to the draft release instead;
 #   - releases use the stable toolchain (RUSTUP_TOOLCHAIN) rather than rust-toolchain.toml's pin;
 #   - unsigned Windows builds on the release branch warn instead of failing;
-#   - no 32-bit Windows (x86) build.
+#   - no 32-bit Windows (x86) build;
+#   - Arch packages of pre-releases get a version arch-package can read (0.1.0rc1).
 # To take suite updates: diff the upstream file against this one and carry the changes over.
 
 name: "Release"
@@ -564,11 +565,35 @@ jobs:
             exit 1
           fi
           tarball="${tarballs[0]}"
+          # BooruCraft: arch-package can't read a pre-release version (0.1.0-rc.1) from the
+          # tarball name and falls back to 0.0.0. Give it Arch's spelling (0.1.0rc1, which pacman
+          # sorts before 0.1.0); the next step names the package after the release again.
+          case "$RELEASE_VERSION" in
+            *-*)
+              pre="${RELEASE_VERSION#*-}"
+              arch_version="${RELEASE_VERSION%%-*}${pre//[.-]/}"
+              renamed="$(dirname "$tarball")/$(basename "$tarball" | sed "s/-${RELEASE_VERSION}-linux-/-${arch_version}-linux-/")"
+              cp "$tarball" "$renamed"
+              tarball="$renamed"
+              echo "arch-version=$arch_version" >>"$GITHUB_OUTPUT"
+              ;;
+          esac
           echo "path=$tarball" >>"$GITHUB_OUTPUT"
       - uses: storytold/craft-common-actions/actions/arch-package@main
         with:
           tarball: ${{ steps.tarball.outputs.path }}
           arch: ${{ matrix.arch }}
+      - name: Name the package after the release version
+        if: steps.tarball.outputs.arch-version != ''
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          ARCH_VERSION: ${{ steps.tarball.outputs.arch-version }}
+        run: |
+          shopt -s nullglob
+          for f in dist/release/*-"$ARCH_VERSION"-linux-*.pkg.tar.zst; do
+            mv "$f" "${f/-$ARCH_VERSION-linux-/-$RELEASE_VERSION-linux-}"
+          done
+          ls -l dist/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-arch-${{ matrix.arch }}
