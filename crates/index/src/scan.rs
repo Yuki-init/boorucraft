@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use boorucraft_store::{Collection, FileEntry, TagList};
 use rayon::prelude::*;
@@ -38,6 +39,46 @@ pub struct ScanReport {
     pub errors: Vec<(PathBuf, String)>,
 }
 
+/// How far a running scan has got, readable from another thread while it runs.
+#[derive(Debug, Default)]
+pub struct ScanProgress {
+    /// Files found so far while walking the folder.
+    found: AtomicUsize,
+    /// Set once the walk is done and hashing starts.
+    hashing: AtomicBool,
+    /// Files that need hashing, and how many of them are done.
+    to_hash: AtomicUsize,
+    hashed: AtomicUsize,
+}
+
+/// What [`ScanProgress::get`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStage {
+    /// Walking the folder: files found so far.
+    Walking(usize),
+    /// Hashing new or changed files: done of total.
+    Hashing(usize, usize),
+}
+
+impl ScanProgress {
+    pub fn get(&self) -> ScanStage {
+        if self.hashing.load(Ordering::Relaxed) {
+            ScanStage::Hashing(self.hashed.load(Ordering::Relaxed), self.to_hash.load(Ordering::Relaxed))
+        } else {
+            ScanStage::Walking(self.found.load(Ordering::Relaxed))
+        }
+    }
+}
+
+/// Adds one to the counter when dropped.
+struct Counted<'a>(&'a AtomicUsize);
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 struct Found {
     rel: String,
     abs: PathBuf,
@@ -54,7 +95,7 @@ pub(crate) fn extensions(c: &Collection) -> BTreeSet<String> {
     }
 }
 
-fn walk(c: &Collection, report: &mut ScanReport) -> Vec<Found> {
+fn walk(c: &Collection, report: &mut ScanReport, progress: &ScanProgress) -> Vec<Found> {
     let exts = extensions(c);
     let root = c.root().to_path_buf();
     let walker = WalkDir::new(&root).follow_links(false).into_iter().filter_entry(|e| {
@@ -93,6 +134,7 @@ fn walk(c: &Collection, report: &mut ScanReport) -> Vec<Found> {
             }
         };
         out.push(Found { rel, abs: entry.into_path(), seen: Seen { size: meta.len(), mtime: mtime_ns(&meta) }, ext });
+        progress.found.store(out.len(), Ordering::Relaxed);
     }
     out
 }
@@ -100,8 +142,13 @@ fn walk(c: &Collection, report: &mut ScanReport) -> Vec<Found> {
 /// Scans the collection folder and updates the collection. Doesn't save anything; the caller
 /// saves the collection and the cache.
 pub fn scan(c: &mut Collection, tags: &TagList, cache: &mut ScanCache) -> ScanReport {
+    scan_with_progress(c, tags, cache, &ScanProgress::default())
+}
+
+/// [`scan`], reporting how far it has got through `progress`.
+pub fn scan_with_progress(c: &mut Collection, tags: &TagList, cache: &mut ScanCache, progress: &ScanProgress) -> ScanReport {
     let mut report = ScanReport::default();
-    let found = walk(c, &mut report);
+    let found = walk(c, &mut report, progress);
     report.files = found.len();
 
     // Hashes: cached when unchanged, computed otherwise.
@@ -116,9 +163,13 @@ pub fn scan(c: &mut Collection, tags: &TagList, cache: &mut ScanCache) -> ScanRe
         }
     }
     report.hashed = to_hash.len();
+    progress.to_hash.store(to_hash.len(), Ordering::Relaxed);
+    progress.hashing.store(true, Ordering::Relaxed);
     let results: Vec<Result<(&Found, Hashes, Meta), (PathBuf, String)>> = to_hash
         .par_iter()
         .map(|f| {
+            // Counted even when it fails, so the count still reaches the total.
+            let _done = Counted(&progress.hashed);
             let hashes = probe::hash_file(&f.abs).map_err(|e| (f.abs.clone(), e.to_string()))?;
             let meta = probe::probe(&f.abs, &hashes.header, &f.ext);
             Ok((*f, hashes, meta))

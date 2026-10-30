@@ -59,6 +59,8 @@ pub struct Options {
     /// Save a screenshot this long after the scans are done, then quit.
     pub screenshot: Option<PathBuf>,
     pub screenshot_after: Duration,
+    /// Count `screenshot_after` from start-up instead of waiting for the scans (to show them).
+    pub screenshot_during_scan: bool,
     /// Put the keyboard focus here at start-up: `search` or `tags`.
     pub focus: Option<String>,
     /// Start on this screen instead of the grid.
@@ -581,7 +583,10 @@ impl App {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(&oc.name).strong()).on_hover_text(oc.root.display().to_string());
                 let status = match &oc.state {
-                    CollState::Scanning => "Scanning…".to_string(),
+                    CollState::Scanning(p) => match p.get() {
+                        boorucraft_index::ScanStage::Walking(n) => library::scan_text(true, n, 0, 0),
+                        boorucraft_index::ScanStage::Hashing(d, t) => library::scan_text(false, 0, d, t),
+                    },
                     CollState::Failed(e) => format!("Error: {e}"),
                     CollState::Ready { c, .. } => {
                         let mut s = format!("{} files", c.len());
@@ -679,9 +684,9 @@ impl App {
                 ui.label(format!("{sel} selected"));
                 ui.separator();
             }
-            if self.lib.is_scanning() {
+            if let Some(status) = self.lib.scan_status() {
                 ui.spinner();
-                ui.label("Scanning…");
+                ui.label(status);
                 ui.separator();
             } else if let Some((done, total)) = self.lib.hash_progress() {
                 ui.spinner();
@@ -710,11 +715,11 @@ impl App {
         if n == 0 {
             ui.centered_and_justified(|ui| {
                 let msg = if self.lib.colls.is_empty() {
-                    "Add a folder to start."
-                } else if self.lib.is_scanning() {
-                    "Scanning…"
+                    "Add a folder to start.".to_string()
+                } else if let Some(status) = self.lib.scan_status() {
+                    status
                 } else {
-                    "Nothing matches this search."
+                    "Nothing matches this search.".to_string()
                 };
                 ui.label(RichText::new(msg).size(16.0).color(Color32::from_gray(150)));
             });
@@ -1436,7 +1441,10 @@ impl App {
 
     /// Applies `--select` / `--view` and takes `--screenshot` once scanning is done.
     fn startup(&mut self, ctx: &egui::Context) {
-        if self.lib.is_busy() {
+        if self.options.screenshot_during_scan && self.ready_at.is_none() {
+            self.ready_at = Some(Instant::now());
+        }
+        if self.lib.is_busy() && !self.options.screenshot_during_scan {
             return;
         }
         if !self.startup_done {
@@ -1459,7 +1467,9 @@ impl App {
                 Some("tags") => Some(TAG_INPUT_ID),
                 _ => None,
             };
-            self.ready_at = Some(Instant::now());
+            if self.ready_at.is_none() {
+                self.ready_at = Some(Instant::now());
+            }
         }
         let Some(path) = self.options.screenshot.clone() else { return };
         let Some(ready) = self.ready_at else { return };

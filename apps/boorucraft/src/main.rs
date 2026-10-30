@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N]
-//!            [--focus search|tags] [--duplicates|--tags] [--slideshow] [--fullscreen] [--screenshot OUT.png [--after SECONDS]] [--size WxH]
+//!            [--focus search|tags] [--duplicates|--tags] [--slideshow] [--fullscreen] [--screenshot OUT.png [--after SECONDS] [--during-scan]] [--size WxH]
 //! ```
 //!
 //! `--collection` opens folders for this session only (they aren't remembered).
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use boorucraft_ui_egui::{App, Options};
 
-const USAGE: &str = "usage: boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N] [--focus search|tags] [--duplicates|--tags] [--slideshow] [--fullscreen] [--screenshot OUT.png [--after SECONDS]] [--size WxH]";
+const USAGE: &str = "usage: boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N] [--focus search|tags] [--duplicates|--tags] [--slideshow] [--fullscreen] [--screenshot OUT.png [--after SECONDS] [--during-scan]] [--size WxH]";
 
 struct Args {
     options: Options,
@@ -45,6 +45,7 @@ fn parse_args() -> Result<Args, String> {
             "--fullscreen" => options.fullscreen = true,
             "--view" => options.view = Some(value("--view")?.parse().map_err(|_| "--view needs a number")?),
             "--screenshot" => options.screenshot = Some(PathBuf::from(value("--screenshot")?)),
+            "--during-scan" => options.screenshot_during_scan = true,
             "--after" => {
                 let s: f64 = value("--after")?.parse().map_err(|_| "--after needs seconds")?;
                 options.screenshot_after = Duration::from_secs_f64(s.clamp(0.0, 600.0));

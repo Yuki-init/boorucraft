@@ -12,7 +12,7 @@ pub mod watch;
 
 pub use cache::ScanCache;
 pub use dupes::{family, find_groups, needing_hashes, set_hashes, stored_hashes};
-pub use scan::{ScanReport, scan};
+pub use scan::{ScanProgress, ScanReport, ScanStage, scan, scan_with_progress};
 pub use sidecar::{SidecarReport, read_back, sidecar_rel, write_sidecars};
 pub use watch::{FolderWatcher, Relevance, classify};
 

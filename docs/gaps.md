@@ -2,8 +2,7 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **UI polish**: a progress count during scans (now only a spinner); preloading the next picture
-   in the viewer and slideshow; thumbnails for videos (via PlayCraft's Rust decoders, see Later).
+1. **UI polish**: preloading the next picture in the viewer and slideshow; thumbnails for videos (via PlayCraft's Rust decoders, see Later).
 2. **Later** (ROADMAP): tag aliases and implications; importing tags from boorus by MD5; a local
    auto-tagger.
 

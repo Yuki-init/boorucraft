@@ -116,3 +116,6 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 - 2026-10-30 — M4.8: slideshow (`s`, viewer bar, `--slideshow`: interval, loop, pause; timing
   starts once a picture has loaded and lets animations finish) and fullscreen (`F11`,
   `--fullscreen`: picture only, with a fading hint). M4 done.
+- 2026-10-30 — P1: scans show their progress ("12 files found", then "hashing 40 / 120") on the
+  collection card, in the status bar and in the empty grid. `--during-scan` lets `--screenshot`
+  capture a running scan.

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use boorucraft_core::{Query, Rating};
 use boorucraft_dedup::Hashes;
 use boorucraft_index::{
-    FolderWatcher, Relevance, ScanCache, ScanReport, SidecarReport, classify, find_groups, needing_hashes, scan, set_hashes, sidecar_rel, write_sidecars,
+    FolderWatcher, Relevance, ScanCache, ScanProgress, ScanReport, ScanStage, SidecarReport, classify, find_groups, needing_hashes, scan_with_progress,
+    set_hashes, sidecar_rel, write_sidecars,
 };
 use boorucraft_store::{Collection, DiskChange, FileEntry, Links, Recovery, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
 use boorucraft_thumbs::ThumbCache;
@@ -153,8 +154,8 @@ pub enum CollState {
         c: Box<Collection>,
         cache: Box<ScanCache>,
     },
-    /// The collection is on a scan thread.
-    Scanning,
+    /// The collection is on a scan thread, which reports how far it has got here.
+    Scanning(Arc<ScanProgress>),
     Failed(String),
 }
 
@@ -521,13 +522,16 @@ impl Library {
         if oc.read_only() || oc.outside_change {
             return;
         }
-        let CollState::Ready { c, cache } = std::mem::replace(&mut oc.state, CollState::Scanning) else { return };
+        let progress = Arc::new(ScanProgress::default());
+        let CollState::Ready { c, cache } = std::mem::replace(&mut oc.state, CollState::Scanning(Arc::clone(&progress))) else {
+            return;
+        };
         let tags = self.tags.snapshot();
         let tx = self.scan_tx.clone();
         let waker = Arc::clone(&self.waker);
         let spawned = std::thread::Builder::new().name("scan".into()).spawn(move || {
             let (mut c, mut cache) = (c, cache);
-            let report = scan(&mut c, &tags, &mut cache);
+            let report = scan_with_progress(&mut c, &tags, &mut cache, &progress);
             let _ = tx.send(ScanDone { coll: idx, c, cache, report });
             waker();
         });
@@ -537,7 +541,31 @@ impl Library {
     }
 
     pub fn is_scanning(&self) -> bool {
-        self.colls.iter().any(|c| matches!(c.state, CollState::Scanning))
+        self.colls.iter().any(|c| matches!(c.state, CollState::Scanning(_)))
+    }
+
+    /// What the running scans have got to, e.g. "Scanning: hashing 40 / 120", if any run.
+    pub fn scan_status(&self) -> Option<String> {
+        let mut found = 0usize;
+        let (mut done, mut total) = (0usize, 0usize);
+        let mut walking = false;
+        let mut any = false;
+        for oc in &self.colls {
+            if let CollState::Scanning(p) = &oc.state {
+                any = true;
+                match p.get() {
+                    ScanStage::Walking(n) => {
+                        walking = true;
+                        found = found.saturating_add(n);
+                    }
+                    ScanStage::Hashing(d, t) => {
+                        done = done.saturating_add(d);
+                        total = total.saturating_add(t);
+                    }
+                }
+            }
+        }
+        any.then(|| scan_text(walking, found, done, total))
     }
 
     /// A scan or the hashing job is running.
@@ -1813,6 +1841,17 @@ impl Drop for Library {
     }
 }
 
+/// "Scanning: 12 files found" while walking, then "Scanning: hashing 40 / 120".
+pub fn scan_text(walking: bool, found: usize, done: usize, total: usize) -> String {
+    if walking {
+        format!("Scanning: {found} files found")
+    } else if total == 0 {
+        "Scanning: checking files".to_string()
+    } else {
+        format!("Scanning: hashing {} / {total}", done.min(total))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2301,6 +2340,14 @@ mod tests {
         assert_eq!(lib.hits.len(), 1, "tag and rating came back from the sidecar");
         lib.flush_all();
         assert!(std::fs::read_to_string(&json).unwrap().contains("\"cat\""));
+    }
+
+    #[test]
+    fn scan_status_text() {
+        assert_eq!(scan_text(true, 12, 0, 0), "Scanning: 12 files found");
+        assert_eq!(scan_text(false, 0, 40, 120), "Scanning: hashing 40 / 120");
+        assert_eq!(scan_text(false, 0, 0, 0), "Scanning: checking files");
+        assert_eq!(scan_text(false, 0, 9, 5), "Scanning: hashing 5 / 5");
     }
 
     #[test]

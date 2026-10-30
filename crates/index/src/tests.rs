@@ -307,3 +307,30 @@ fn a_lost_collection_is_rebuilt_from_its_sidecars() {
     assert_eq!(e.source.as_deref(), Some("https://example.org/1"));
     assert!(c.get(&b).unwrap().tags.contains("sky"));
 }
+
+#[test]
+fn scan_progress_counts_found_and_hashed_files() {
+    use crate::{ScanProgress, ScanStage, scan_with_progress};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..5 {
+        write(root, &format!("p{i}.png"), &png(20 + i, 20));
+    }
+    let tags = tag_list();
+    let mut cache = ScanCache::in_memory();
+    let mut c = Collection::open(root).unwrap();
+    let p = ScanProgress::default();
+    assert_eq!(p.get(), ScanStage::Walking(0));
+    scan_with_progress(&mut c, &tags, &mut cache, &p);
+    assert_eq!(p.get(), ScanStage::Hashing(5, 5));
+    // Unreadable files still count, so the count reaches the total.
+    write(root, "p9.png", &png(99, 20));
+    let p = ScanProgress::default();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.join("p9.png"), fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let r = scan_with_progress(&mut c, &tags, &mut cache, &p);
+    assert_eq!(p.get(), ScanStage::Hashing(1, 1), "{:?}", r.errors);
+}
