@@ -22,7 +22,7 @@ use boorucraft_core::{Rating, normalize_tag};
 use boorucraft_thumbs::ThumbCache;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
-use library::{CollState, Config, Dirs, Hit, Library, PoolMove};
+use library::{CollState, Config, Dirs, Hit, Library, PoolMove, StackKey};
 use selection::Selection;
 use thumbnails::{Thumb, Thumbnails};
 use viewer::Viewer;
@@ -88,6 +88,8 @@ pub struct App {
     /// The copy to keep in each duplicate group, by the group's first hash (default: the best).
     dupe_keep: HashMap<String, Hit>,
     confirm_trash: Option<dupes_view::TrashPlan>,
+    /// Searches to go back to after opening a stack (Backspace).
+    back: Vec<String>,
 }
 
 impl App {
@@ -129,6 +131,7 @@ impl App {
             screen,
             dupe_keep: HashMap::new(),
             confirm_trash: None,
+            back: Vec::new(),
         }
     }
 
@@ -261,6 +264,7 @@ impl App {
             }
             match key {
                 Key::Escape => self.sel.clear(),
+                Key::Backspace => self.go_back(),
                 Key::Enter => {
                     if let Some(c) = self.sel.cursor {
                         self.activate(c, ctx);
@@ -305,8 +309,30 @@ impl App {
         }
     }
 
-    /// Double-click or Enter: the viewer for pictures BooruCraft can show, else the default app.
+    /// Shows a whole stack; Backspace returns to the search it was opened from.
+    fn open_stack(&mut self, key: &StackKey) {
+        self.back.push(self.query.clone());
+        if self.back.len() > 50 {
+            self.back.remove(0);
+        }
+        self.query = key.query();
+        self.viewer = None;
+    }
+
+    fn go_back(&mut self) {
+        if let Some(q) = self.back.pop() {
+            self.query = q;
+            self.viewer = None;
+        }
+    }
+
+    /// Double-click or Enter: a stack opens; otherwise the viewer for pictures BooruCraft can
+    /// show, else the default app.
     fn activate(&mut self, pos: usize, ctx: &egui::Context) {
+        if let Some(stack) = self.lib.hits.get(pos).and_then(|h| self.lib.stacks.get(h)).cloned() {
+            self.open_stack(&stack.key);
+            return;
+        }
         let decodable = self.lib.hits.get(pos).and_then(|h| self.lib.entry(h)).is_some_and(|e| boorucraft_thumbs::can_decode(&e.format));
         if decodable {
             self.open_result(pos, ctx);
@@ -319,7 +345,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let count = format!("{} results", self.lib.hits.len());
-            let right_width = 450.0;
+            let right_width = 540.0;
             let width = (ui.available_width() - right_width).max(160.0);
             let bad = self.lib.query_error.is_some();
             let err_span = self.lib.query_error.as_ref().map(|(_, s)| s.clone());
@@ -346,6 +372,9 @@ impl App {
                 self.focus = None;
             }
             ui.label(RichText::new(count).color(Color32::from_gray(170)));
+            if !self.back.is_empty() && ui.small_button("← Back").on_hover_text("Back to the previous search (Backspace)").clicked() {
+                self.go_back();
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let groups = self.lib.dupe_groups.len();
                 let on = self.screen == Screen::Duplicates;
@@ -353,6 +382,15 @@ impl App {
                 if ui.selectable_label(on, label).on_hover_text("Review near-duplicate pictures").clicked() {
                     self.screen = if on { Screen::Grid } else { Screen::Duplicates };
                     self.viewer = None;
+                }
+                let stacking = self.lib.stacking();
+                if ui
+                    .selectable_label(stacking, "Stacks")
+                    .on_hover_text("Show each pool and each family of versions as one tile; double-click a stack to open it")
+                    .clicked()
+                {
+                    self.lib.set_stacking(!stacking);
+                    self.searched = None;
                 }
                 if ui.button("Add folder…").on_hover_text("Open a folder as a collection").clicked()
                     && let Some(dir) = rfd::FileDialog::new().set_title("Choose a picture folder").pick_folder()
@@ -510,6 +548,21 @@ impl App {
                         if let Some(n) = page {
                             corner_badge(ui.painter(), resp.rect, format!("#{n}"));
                         }
+                        let resp = match self.lib.stacks.get(hit) {
+                            Some(stack) => {
+                                let (what, color) = match &stack.key {
+                                    StackKey::Pool(_) => ("pages", POOL_COLOR),
+                                    StackKey::Family(_) => ("versions", Color32::from_rgb(230, 180, 110)),
+                                };
+                                stack_badge(ui.painter(), resp.rect, &format!("{} {what}", stack.count), color);
+                                let name = match &stack.key {
+                                    StackKey::Pool(p) => format!("Pool {p}"),
+                                    StackKey::Family(_) => "A picture and its versions".to_string(),
+                                };
+                                resp.on_hover_text(format!("{name}: {} {what}. Double-click or Enter to open; Backspace comes back.", stack.count))
+                            }
+                            None => resp,
+                        };
                         if resp.double_clicked() {
                             activated = Some(i);
                         } else if resp.clicked() {
@@ -1147,6 +1200,20 @@ fn draw_tile(ui: &mut egui::Ui, lib: &Library, thumbs: &mut Thumbnails, hit: &Hi
             ui.label(if more > 0 { format!("{} +{more}", shown.join(" ")) } else { shown.join(" ") });
         }
     })
+}
+
+/// Marks a tile that stands for a stack: two card edges behind its top-right corner and a
+/// count.
+fn stack_badge(painter: &egui::Painter, rect: Rect, text: &str, color: Color32) {
+    for k in [2.0, 1.0] {
+        let edge = Rect::from_min_max(pos2(rect.left() + 8.0 + 4.0 * k, rect.top() - 0.0), pos2(rect.right(), rect.top() + 3.0 * k));
+        painter.rect_stroke(edge, CornerRadius::same(2), Stroke::new(1.0, color.gamma_multiply(0.5 + 0.2 * k)), StrokeKind::Inside);
+    }
+    let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(11.0), Color32::BLACK);
+    let size = galley.size() + vec2(8.0, 4.0);
+    let r = Rect::from_min_size(pos2(rect.right() - 6.0 - size.x, rect.top() + 8.0), size);
+    painter.rect_filled(r, CornerRadius::same(3), color);
+    painter.galley(r.min + vec2(4.0, 2.0), galley, Color32::BLACK);
 }
 
 /// A label in the bottom-left corner of a tile (pool page numbers).

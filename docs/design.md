@@ -380,6 +380,18 @@ after every change; files from different collections interleave by position.
   `pools add|remove DIR NAME FILE...`.
 - Not written to XMP sidecars.
 
+## Stacks (M3.5)
+
+With **Stacks** on (top bar; on by default, saved in `config.json`), each pool and each family
+of versions in the results shows as one tile: a pool by its first page, a family by its top
+parent, or, if that didn't match the search, by the matching member nearest the top. The
+tile keeps that file's place in the order and gets a "n pages" / "n versions" badge and card
+edges. A file in several pools stacks with its first pool by name; pools come before
+families. Double-click or Enter opens the stack (`pool:…` or `parent:…`); Backspace or
+"← Back" returns to the search it came from. Searches that already name a pool or a parent
+aren't stacked. Selecting a stacked tile acts on that one file, and the sidebar counts cover
+the visible tiles.
+
 ## UI
 
 - **Top**: search bar with autocomplete and error underline; result count; collection picker.

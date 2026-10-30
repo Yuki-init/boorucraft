@@ -1,7 +1,8 @@
 # BooruCraft roadmap
 
 **Stage:** pre-alpha. The desktop app opens folders, shows a thumbnail grid and a viewer, searches
-with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to `collection.json` and XMP sidecars). Design:
+with the full booru syntax (tags, metatags, `order:`), edits tags (saved to `collection.json` and XMP sidecars),
+finds and reviews near-duplicates, and groups files into pools and families of versions. Design:
 [docs/design.md](docs/design.md). Ranked work list: [docs/gaps.md](docs/gaps.md).
 
 | Milestone | Goal | Status |
@@ -9,7 +10,7 @@ with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to 
 | M0 | Repo, Podman gate (copy PlayCraft's scripts), workspace, Rust-only dependency check, central `tags.json` and `collection.json` formats with atomic save, backup and lock, in-memory tag index, XMP sidecar read/update that keeps other apps' fields, scanner (hash, metadata, path tracking), `boorucraft-cli scan / info / tag / search` with plain tags | done |
 | M1 | Desktop app: add and open collection folders, thumbnail cache and worker pool, virtualised grid, viewer (zoom, pan, next/prev, animation), open unsupported formats in the default app, tag editor with the central tag list and "Create tag", bulk tagging, ratings | done |
 | M2 | Full search syntax (negation, OR, wildcards, every metatag, `order:`), error underline, autocomplete, tag sidebar with counts, namespaces and colours | done |
-| M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates); grouping: parent/child links and pools, stacked in the grid | in progress (M3.1–M3.4 done) |
+| M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates); grouping: parent/child links and pools, stacked in the grid | done |
 | M4 | File watching, reload on outside changes, missing-file handling, Tags screen (rename/merge/delete across all collections, catch-up for closed ones), Unknown tags review, reading back sidecars edited by other apps, rebuild from sidecars, saved searches, slideshow | |
 | Later | Tag aliases and implications; import tags from boorus by MD5; local ML auto-tagger; video thumbnails via PlayCraft's Rust decoders | |
 
@@ -76,3 +77,6 @@ with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to 
   `history`), positions in each file's entry, `pool:` searches in pool order (`order:pool`),
   sidebar list, Pools section in the tag panel (add with autocomplete, create, remove, move
   first/earlier/later/last, `[` `]` keys), page badges in the grid, `boorucraft-cli pools`.
+- 2026-10-30 — M3.5: stacks: each pool and family shows as one tile (first page / top parent)
+  with a count badge; double-click opens it, Backspace or "← Back" returns; toggle in the top
+  bar. M3 done.

@@ -2,10 +2,9 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **M3**: stacks in the grid (M3.5).
-2. **M4**: `notify` file watching, reload on outside changes to `collection.json` / `tags.json`,
+1. **M4**: `notify` file watching, reload on outside changes to `collection.json` / `tags.json`,
    Tags screen, Unknown tags screen, rebuild from sidecars, saved searches, slideshow.
-3. **UI polish**: fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
+2. **UI polish**: fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
    for videos (via PlayCraft's Rust decoders, see Later).
 
 ## Known limitations
@@ -33,3 +32,7 @@ Pick from the top. Each item names its milestone.
   `collection.json`, not in XMP sidecars, so "Rebuild from sidecars" can't bring them back.
 - A pool search holds only the files in open collections; pages in a closed collection keep
   their numbers and slot back in when it opens.
+- With Stacks on, the sidebar's tag and rating counts cover the visible tiles, not the files
+  hidden inside stacks.
+- Perceptual hashes come from thumbnails; pictures with large flat areas (wallpapers with one
+  object in the middle) can still match falsely at higher thresholds.

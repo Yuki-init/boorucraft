@@ -46,6 +46,9 @@ pub struct Config {
     /// Most bits two perceptual hashes may differ by for near-duplicates (default 6).
     #[serde(default)]
     pub dupe_threshold: Option<u32>,
+    /// Show each pool and each family of versions as one tile (default on).
+    #[serde(default)]
+    pub stacks: Option<bool>,
 }
 
 impl Config {
@@ -66,6 +69,32 @@ impl Config {
         bytes.push(b'\n');
         safefile::write_atomic(&path, &bytes, false).map(|_| ()).map_err(|e| e.to_string())
     }
+}
+
+/// What a stacked tile stands for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StackKey {
+    Pool(String),
+    /// A family of versions, by the hash of its top parent.
+    Family(String),
+}
+
+impl StackKey {
+    /// The search that shows the whole stack.
+    pub fn query(&self) -> String {
+        match self {
+            StackKey::Pool(p) => format!("pool:{p}"),
+            StackKey::Family(h) => format!("parent:{}", h.get(..16).unwrap_or(h)),
+        }
+    }
+}
+
+/// A tile standing for several results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stack {
+    pub key: StackKey,
+    /// Results in the stack, this one included.
+    pub count: usize,
 }
 
 /// Where to move files within a pool.
@@ -155,6 +184,8 @@ pub struct Library {
     pub messages: Vec<(String, Instant)>,
     /// The pool whose order the current results follow (a `pool:name` search).
     pub pool_view: Option<String>,
+    /// Results that stand for a stack of others (hidden from `hits`).
+    pub stacks: HashMap<Hit, Stack>,
     /// Tags of the current results with counts, most used first.
     pub result_tags: Vec<(String, u64)>,
     /// Ratings of the current results: safe, questionable, explicit, none.
@@ -222,6 +253,7 @@ impl Library {
             query_error: None,
             messages,
             pool_view: None,
+            stacks: HashMap::new(),
             result_tags: Vec::new(),
             result_ratings: [0; 4],
             usage: None,
@@ -558,7 +590,76 @@ impl Library {
         }
         rows.sort_by(|a, b| compare_rows(&query, a.1, b.1).then(a.0.cmp(&b.0)));
         self.hits = rows.into_iter().map(|(coll, r)| Hit { coll, hash: r.hash.clone() }).collect();
+        self.stacks.clear();
+        let targets_group = query.terms.iter().any(|t| matches!(t.kind, boorucraft_core::TermKind::Pool(_) | boorucraft_core::TermKind::Parent(_)));
+        if self.stacking() && !targets_group {
+            self.stack_hits();
+        }
         self.recount();
+    }
+
+    pub fn stacking(&self) -> bool {
+        self.config.stacks.unwrap_or(true)
+    }
+
+    pub fn set_stacking(&mut self, on: bool) {
+        self.config.stacks = Some(on);
+        if !self.session_only {
+            self.save_config();
+        }
+    }
+
+    /// The stack a file belongs to: its first pool (by name), else its family's top parent.
+    fn stack_key(&self, hit: &Hit) -> Option<StackKey> {
+        let e = self.entry(hit)?;
+        if let Some(pool) = e.pools.keys().next() {
+            return Some(StackKey::Pool(pool.clone()));
+        }
+        if e.parent.is_some() {
+            let top = self.ancestors(&hit.hash).pop()?;
+            return Some(StackKey::Family(top));
+        }
+        self.links.parents.contains(&hit.hash).then(|| StackKey::Family(hit.hash.clone()))
+    }
+
+    /// Folds each pool and family into one result: a pool's first page, a family's top parent
+    /// (or the matching member nearest the top), at that file's place in the order.
+    fn stack_hits(&mut self) {
+        let keys: Vec<Option<StackKey>> = self.hits.iter().map(|h| self.stack_key(h)).collect();
+        let mut best: HashMap<&StackKey, (usize, (u32, usize))> = HashMap::new();
+        let mut counts: HashMap<&StackKey, usize> = HashMap::new();
+        for (i, (hit, key)) in self.hits.iter().zip(&keys).enumerate() {
+            let Some(key) = key else { continue };
+            *counts.entry(key).or_default() += 1;
+            // Lower ranks win: the page number in a pool, the depth in a family (the top parent
+            // is 0); then the place in the order.
+            let rank = match key {
+                StackKey::Pool(p) => (self.entry(hit).and_then(|e| e.pools.get(p).copied()).unwrap_or(u32::MAX), i),
+                StackKey::Family(_) => (u32::try_from(self.ancestors(&hit.hash).len()).unwrap_or(u32::MAX), i),
+            };
+            let slot = best.entry(key).or_insert((i, rank));
+            if rank < slot.1 {
+                *slot = (i, rank);
+            }
+        }
+        let mut stacks = HashMap::new();
+        let mut kept = Vec::with_capacity(self.hits.len());
+        for (i, (hit, key)) in self.hits.iter().zip(&keys).enumerate() {
+            match key {
+                None => kept.push(hit.clone()),
+                Some(k) => {
+                    let count = counts.get(k).copied().unwrap_or(1);
+                    if best.get(k).is_some_and(|(at, _)| *at == i) {
+                        kept.push(hit.clone());
+                        if count > 1 {
+                            stacks.insert(hit.clone(), Stack { key: k.clone(), count });
+                        }
+                    }
+                }
+            }
+        }
+        self.hits = kept;
+        self.stacks = stacks;
     }
 
     /// Recounts the tags and ratings of the current results (after a search or an edit).
@@ -1397,6 +1498,40 @@ mod tests {
         assert_eq!(names(&lib), vec!["p2.png"]);
         lib.flush_all();
         assert!(std::fs::read_to_string(two.join("collection.json")).unwrap().contains("\"comic\": 2"));
+    }
+
+    #[test]
+    fn pools_and_families_stack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        for (i, name) in ["page1.png", "page2.png", "page3.png", "base.png", "edit.png", "crop.png", "alone.png"].iter().enumerate() {
+            picture(&pics.join(name), i as u8 * 30);
+        }
+        let mut lib = library(tmp.path(), &pics);
+        let by_name = |lib: &Library, n: &str| lib.hits.iter().find(|h| lib.entry(h).unwrap().paths.contains(n)).cloned().unwrap();
+        lib.set_stacking(false);
+        lib.search("order:name");
+        let (p1, p2, p3) = (by_name(&lib, "page1.png"), by_name(&lib, "page2.png"), by_name(&lib, "page3.png"));
+        let (base, edit, crop) = (by_name(&lib, "base.png"), by_name(&lib, "edit.png"), by_name(&lib, "crop.png"));
+        lib.create_pool("comic");
+        lib.add_to_pool(&[p2.clone(), p1.clone(), p3.clone()], "comic");
+        lib.set_parent(std::slice::from_ref(&edit), Some(&base));
+        lib.set_parent(std::slice::from_ref(&crop), Some(&edit));
+
+        lib.set_stacking(true);
+        lib.search("order:name");
+        let names: Vec<String> = lib.hits.iter().map(|h| lib.entry(h).unwrap().paths.iter().next().unwrap().clone()).collect();
+        assert_eq!(names, vec!["alone.png", "base.png", "page2.png"], "one tile per pool (its first page) and per family (its top parent)");
+        assert_eq!(lib.stacks.get(&p2).map(|s| (s.key.query(), s.count)), Some(("pool:comic".into(), 3)));
+        assert_eq!(lib.stacks.get(&base).map(|s| s.count), Some(3), "grandchildren too");
+        lib.search(&format!("-hash:{}", &base.hash[..16]));
+        assert!(lib.hits.contains(&edit) && !lib.hits.contains(&crop), "without the parent, the member nearest the top stands for the family");
+        lib.search("pool:comic");
+        assert_eq!(lib.hits.len(), 3, "a pool search isn't stacked");
+        assert!(lib.stacks.is_empty());
+        lib.search(&lib.stacks.get(&base).map_or_else(|| StackKey::Family(base.hash.clone()).query(), |s| s.key.query()));
+        assert_eq!(lib.hits.len(), 2, "parent: shows a file and its direct children");
     }
 
     #[test]
