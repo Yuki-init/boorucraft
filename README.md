@@ -25,7 +25,7 @@ Status: pre-alpha; the desktop app and the command-line tool work. See
 
 ## Download
 
-Builds for Linux (AppImage, .deb, .rpm, Flatpak, Arch, tarball; x86_64, aarch64 and riscv64),
+Builds for Linux (AppImage, .deb, .rpm, Flatpak, Arch, tarball; x86_64 and aarch64),
 Windows (MSI, portable zip; x64 and arm64) and macOS (DMG, universal) are attached to each [release](https://github.com/Yuki-init/boorucraft/releases).
 They are made by `.github/workflows/release.yml` (a copy of the Craft suite's shared release
 workflow) and, for macOS, by `scripts/release-macos.sh` on a Mac; the scripts are in `packaging/`.

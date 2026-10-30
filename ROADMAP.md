@@ -156,4 +156,4 @@ aliases and implications, watches folders for outside changes, and shows video t
   Windows allowed, FreeBSD x86_64 only); `scripts/release-macos.sh` builds the DMG on a Mac and
   adds it to the draft. Fixed the Windows build (trash needs a COM threading feature).
 - 2026-10-30 — R3.4: releases skip FreeBSD, web and 32-bit Windows (no users to justify the
-  build minutes): Linux x86_64/aarch64/riscv64, Windows x64/arm64, macOS universal.
+  build minutes), nor riscv64: Linux x86_64/aarch64, Windows x64/arm64, macOS universal.
