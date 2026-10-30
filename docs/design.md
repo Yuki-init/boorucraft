@@ -164,8 +164,12 @@ one collection or all open ones.
   collection is opened. A second app instance opens it read-only; a stale lock from a crashed
   process on the same machine is detected and replaced (Linux; elsewhere the message says which
   file to delete).
-- **Changed by someone else**: if `collection.json` changed on disk since the last load or save
-  (another tool, a sync program), the app reloads it and asks before saving over it.
+- **Changed by someone else**: every 2 seconds (and on file-watch events) the app compares
+  `collection.json` and `tags.json` with what it last loaded or saved: size and time first, the
+  content only if those differ. A changed file is reloaded when the app has no unsaved changes to
+  it (sidecars of files whose tags changed are rewritten to match). Otherwise nothing is saved
+  until the user picks "Keep mine" (their version goes to the `.bak`) or "Load theirs". A
+  deleted file is written again. A file that can't be parsed is never loaded; the user is asked.
 - **Damaged file**: if it doesn't parse, the app offers to load `.bak` and never overwrites
   the damaged file.
 

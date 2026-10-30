@@ -22,7 +22,7 @@ use boorucraft_core::{Rating, normalize_tag};
 use boorucraft_thumbs::ThumbCache;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
-use library::{CollState, Config, Dirs, Hit, Library, PoolMove, StackKey};
+use library::{CollState, Config, Dirs, Hit, Library, Outside, PoolMove, StackKey};
 use selection::Selection;
 use thumbnails::{Thumb, Thumbnails};
 use viewer::Viewer;
@@ -421,6 +421,10 @@ impl App {
         }
         let mut rescan = None;
         let mut close = None;
+        let mut settle = None;
+        if self.lib.tags_outside_change {
+            settle = outside_change_box(ui, "The tag list (tags.json)", Outside::TagList).or(settle);
+        }
         for (i, oc) in self.lib.colls.iter().enumerate() {
             ui.group(|ui| {
                 ui.set_width(ui.available_width());
@@ -446,6 +450,9 @@ impl App {
                 if let Some(r) = &oc.last_report {
                     ui.label(RichText::new(r).small().color(Color32::from_gray(120)));
                 }
+                if oc.outside_change {
+                    settle = outside_change_box(ui, "collection.json", Outside::Collection(i)).or(settle);
+                }
                 ui.horizontal(|ui| {
                     let ready = matches!(oc.state, CollState::Ready { .. });
                     if ui.add_enabled(ready && !oc.read_only(), egui::Button::new("Rescan").small()).clicked() {
@@ -460,6 +467,10 @@ impl App {
                     }
                 });
             });
+        }
+        if let Some((which, keep_mine)) = settle {
+            self.lib.resolve_outside_change(which, keep_mine);
+            self.searched = None;
         }
         if let Some(i) = rescan {
             self.lib.start_scan(i);
@@ -1136,6 +1147,8 @@ impl eframe::App for App {
         if self.lib.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        // Wake up now and then to notice files changed by other programs.
+        ctx.request_repaint_after(library::DISK_CHECK_EVERY);
     }
 
     fn on_exit(&mut self) {
@@ -1428,6 +1441,26 @@ fn parse_color(s: &str) -> Option<Color32> {
     }
     let v = u32::from_str_radix(hex, 16).ok()?;
     Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// The choice shown when another program changed a file this window has unsaved changes to.
+/// Returns the user's answer: (which file, keep mine).
+fn outside_change_box(ui: &mut egui::Ui, what: &str, which: Outside) -> Option<(Outside, bool)> {
+    let mut answer = None;
+    egui::Frame::new().fill(Color32::from_rgb(70, 45, 30)).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(format!("{what} was changed by another program")).strong().color(Color32::from_rgb(245, 190, 120)));
+        ui.label(RichText::new("This window has changes it hasn't saved yet, so nothing is saved until you choose.").small().color(Color32::from_gray(200)));
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button("Keep mine").on_hover_text("Save this window's version; the other one is kept as a .bak file").clicked() {
+                answer = Some((which, true));
+            }
+            if ui.small_button("Load theirs").on_hover_text("Load the version on disk; this window's unsaved changes are dropped").clicked() {
+                answer = Some((which, false));
+            }
+        });
+    });
+    answer
 }
 
 #[cfg(test)]

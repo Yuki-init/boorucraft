@@ -83,3 +83,11 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 - 2026-10-30 — M3.6: fixes from a 100-post Safebooru test copy: tags may start with `:` (booru
   face tags like `:d`, `:3`; a trailing `:` is still refused), and `boorucraft-cli` no longer
   panics when its output pipe closes early (`info DIR | head`); it finishes quietly instead.
+- 2026-10-30 — M4 planned: M4.1 outside changes, M4.2 file watching, M4.3 missing files, M4.4
+  Tags screen, M4.5 Unknown tags review, M4.6 rebuild from sidecars, M4.7 saved searches, M4.8
+  slideshow and fullscreen.
+- 2026-10-30 — M4.1: `collection.json` and `tags.json` changed by other programs are noticed
+  (one `stat` per file every 2 s; content compared only when size or time differ). Reloaded
+  when there are no unsaved changes (sidecars follow; tag-list renames in `history` reach open
+  collections); otherwise saving stops and the collection card asks "Keep mine" / "Load theirs".
+  Deleted files are written again; damaged ones are never loaded.

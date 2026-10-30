@@ -10,7 +10,7 @@ use boorucraft_core::{Rating, normalize_tag};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::safefile::{self, Lock, Stamp};
+use crate::safefile::{self, DiskChange, Lock, Meta, Stamp};
 use crate::taglist::{HistoryOp, TagList};
 use crate::{Result, StoreError};
 
@@ -171,6 +171,8 @@ pub struct Collection {
     json: PathBuf,
     data: CollectionFile,
     stamp: Option<Stamp>,
+    /// Size and time of collection.json when loaded or saved, see [`Collection::disk_change`].
+    meta: Option<Meta>,
     lock: Option<Lock>,
     dirty: bool,
 }
@@ -199,7 +201,7 @@ impl Collection {
             return Err(StoreError::Invalid(format!("{} is not a folder", root.display())));
         }
         let Some(bytes) = safefile::read_capped(&json, MAX_BYTES)? else {
-            return Ok(Collection { root, json, data: CollectionFile::default(), stamp: None, lock: None, dirty: true });
+            return Ok(Collection { root, json, data: CollectionFile::default(), stamp: None, meta: None, lock: None, dirty: true });
         };
         let data: CollectionFile = serde_json::from_slice(&bytes).map_err(|source| StoreError::Json { path: json.clone(), source })?;
         if data.format != FORMAT {
@@ -208,7 +210,8 @@ impl Collection {
         if data.version > VERSION {
             return Err(StoreError::NewerVersion { path: json, version: data.version });
         }
-        Ok(Collection { root, json, data, stamp: Some(Stamp::of(&bytes)), lock: None, dirty: false })
+        let meta = Meta::of(&json);
+        Ok(Collection { root, json, data, stamp: Some(Stamp::of(&bytes)), meta, lock: None, dirty: false })
     }
 
     pub fn root(&self) -> &Path {
@@ -431,7 +434,38 @@ impl Collection {
         let mut bytes = serde_json::to_vec_pretty(&self.data).map_err(|source| StoreError::Json { path: self.json.clone(), source })?;
         bytes.push(b'\n');
         self.stamp = Some(safefile::write_atomic(&self.json, &bytes, true)?);
+        self.meta = Meta::of(&self.json);
         self.dirty = false;
+        Ok(())
+    }
+
+    /// Has another program changed or deleted collection.json since it was loaded or saved?
+    /// Usually costs one `stat`.
+    pub fn disk_change(&mut self) -> Result<DiskChange> {
+        safefile::disk_change(&self.json, self.stamp, &mut self.meta, MAX_BYTES)
+    }
+
+    /// Replaces everything in memory with collection.json as it is on disk now (unsaved changes
+    /// are dropped). The lock is kept. Fails, changing nothing, if the file can't be read or
+    /// parsed; a deleted file can't be reloaded either.
+    pub fn reload(&mut self) -> Result<()> {
+        let fresh = Self::load(self.root.clone(), self.json.clone())?;
+        if fresh.stamp.is_none() {
+            return Err(StoreError::Invalid(format!("{} no longer exists", self.json.display())));
+        }
+        self.data = fresh.data;
+        self.stamp = fresh.stamp;
+        self.meta = fresh.meta;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Keeps what is in memory: the next save replaces collection.json even though another
+    /// program changed (or deleted) it. Its version stays in collection.json.bak.
+    pub fn overwrite_disk_version(&mut self) -> Result<()> {
+        self.stamp = safefile::read_capped(&self.json, MAX_BYTES)?.map(|b| Stamp::of(&b));
+        self.meta = Meta::of(&self.json);
+        self.dirty = true;
         Ok(())
     }
 }
@@ -462,6 +496,41 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(COLLECTION_FILE)).unwrap();
         assert!(text.contains("\"format\": \"boorucraft-collection\""), "{text}");
         assert!(!text.contains("missing"), "false flags are left out");
+    }
+
+    #[test]
+    fn reloads_or_overwrites_outside_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Collection::open(dir.path()).unwrap();
+        c.insert("aa".into(), entry("cat.png", &["cat"]));
+        c.save().unwrap();
+        assert_eq!(c.disk_change().unwrap(), DiskChange::Unchanged);
+        let json = dir.path().join(COLLECTION_FILE);
+        let theirs = std::fs::read_to_string(&json).unwrap().replace("\"cat\"", "\"dog\"");
+        std::fs::write(&json, &theirs).unwrap();
+        assert_eq!(c.disk_change().unwrap(), DiskChange::Changed);
+        c.reload().unwrap();
+        assert_eq!(c.get("aa").unwrap().tags.iter().collect::<Vec<_>>(), ["dog"]);
+        assert_eq!(c.disk_change().unwrap(), DiskChange::Unchanged);
+        assert!(!c.is_read_only(), "the lock is kept");
+
+        // Keep mine over a newer outside version.
+        c.get_mut("aa").unwrap().tags.insert("mine".into());
+        std::fs::write(&json, theirs.replace("dog", "bird")).unwrap();
+        assert!(matches!(c.save(), Err(StoreError::ChangedOnDisk { .. })));
+        c.overwrite_disk_version().unwrap();
+        c.save().unwrap();
+        assert!(std::fs::read_to_string(&json).unwrap().contains("mine"));
+        assert!(std::fs::read_to_string(dir.path().join("collection.json.bak")).unwrap().contains("bird"), "their version is in the .bak");
+
+        // Deleted: can't be reloaded, but can be written again.
+        std::fs::remove_file(&json).unwrap();
+        assert_eq!(c.disk_change().unwrap(), DiskChange::Deleted);
+        assert!(c.reload().is_err());
+        assert!(c.get("aa").is_some(), "a failed reload changes nothing");
+        c.overwrite_disk_version().unwrap();
+        c.save().unwrap();
+        assert!(json.exists());
     }
 
     #[test]

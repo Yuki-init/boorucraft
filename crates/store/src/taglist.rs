@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use boorucraft_core::{is_valid_namespace, normalize_tag, split_namespace};
 use serde::{Deserialize, Serialize};
 
-use crate::safefile::{self, Lock, Stamp};
+use crate::safefile::{self, DiskChange, Lock, Meta, Stamp};
 use crate::{Result, StoreError};
 
 pub const FORMAT: &str = "boorucraft-tags";
@@ -94,6 +94,8 @@ pub struct TagList {
     data: TagListFile,
     /// What was on disk at load or last save (`None`: no file yet).
     stamp: Option<Stamp>,
+    /// Size and time of the file when loaded or saved, see [`TagList::disk_change`].
+    meta: Option<Meta>,
     /// `None` when opened read-only.
     lock: Option<Lock>,
     dirty: bool,
@@ -119,7 +121,7 @@ impl TagList {
 
     fn load(path: &Path) -> Result<TagList> {
         let Some(bytes) = safefile::read_capped(path, MAX_BYTES)? else {
-            return Ok(TagList { path: path.to_path_buf(), data: TagListFile::default(), stamp: None, lock: None, dirty: true });
+            return Ok(TagList { path: path.to_path_buf(), data: TagListFile::default(), stamp: None, meta: None, lock: None, dirty: true });
         };
         let data: TagListFile = serde_json::from_slice(&bytes).map_err(|source| StoreError::Json { path: path.to_path_buf(), source })?;
         if data.format != FORMAT {
@@ -128,17 +130,17 @@ impl TagList {
         if data.version > VERSION {
             return Err(StoreError::NewerVersion { path: path.to_path_buf(), version: data.version });
         }
-        Ok(TagList { path: path.to_path_buf(), data, stamp: Some(Stamp::of(&bytes)), lock: None, dirty: false })
+        Ok(TagList { path: path.to_path_buf(), data, stamp: Some(Stamp::of(&bytes)), meta: Meta::of(path), lock: None, dirty: false })
     }
 
     /// An in-memory list that is never saved, for tests and previews.
     pub fn in_memory() -> TagList {
-        TagList { path: PathBuf::new(), data: TagListFile::default(), stamp: None, lock: None, dirty: false }
+        TagList { path: PathBuf::new(), data: TagListFile::default(), stamp: None, meta: None, lock: None, dirty: false }
     }
 
     /// A read-only copy, e.g. for a background scan. Saving it fails.
     pub fn snapshot(&self) -> TagList {
-        TagList { path: self.path.clone(), data: self.data.clone(), stamp: self.stamp, lock: None, dirty: false }
+        TagList { path: self.path.clone(), data: self.data.clone(), stamp: self.stamp, meta: self.meta, lock: None, dirty: false }
     }
 
     /// Opened without the lock (another BooruCraft had it): changes can't be saved.
@@ -410,7 +412,39 @@ impl TagList {
         let mut bytes = serde_json::to_vec_pretty(&self.data).map_err(|source| StoreError::Json { path: self.path.clone(), source })?;
         bytes.push(b'\n');
         self.stamp = Some(safefile::write_atomic(&self.path, &bytes, true)?);
+        self.meta = Meta::of(&self.path);
         self.dirty = false;
+        Ok(())
+    }
+
+    /// Has another program changed or deleted the file since it was loaded or saved?
+    pub fn disk_change(&mut self) -> Result<DiskChange> {
+        if self.path.as_os_str().is_empty() {
+            return Ok(DiskChange::Unchanged);
+        }
+        safefile::disk_change(&self.path, self.stamp, &mut self.meta, MAX_BYTES)
+    }
+
+    /// Replaces the list in memory with the file as it is on disk now (unsaved changes are
+    /// dropped); the lock is kept. Fails, changing nothing, if it can't be read or parsed.
+    pub fn reload(&mut self) -> Result<()> {
+        let fresh = Self::load(&self.path)?;
+        if fresh.stamp.is_none() {
+            return Err(StoreError::Invalid(format!("{} no longer exists", self.path.display())));
+        }
+        self.data = fresh.data;
+        self.stamp = fresh.stamp;
+        self.meta = fresh.meta;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Keeps the list in memory: the next save replaces the file even though another program
+    /// changed or deleted it (its version stays in the `.bak`).
+    pub fn overwrite_disk_version(&mut self) -> Result<()> {
+        self.stamp = safefile::read_capped(&self.path, MAX_BYTES)?.map(|b| Stamp::of(&b));
+        self.meta = Meta::of(&self.path);
+        self.dirty = true;
         Ok(())
     }
 }
@@ -544,6 +578,28 @@ mod tests {
         std::fs::write(&p, "{\"format\":\"boorucraft-tags\",\"version\":1}").unwrap();
         t.create("cat", "").unwrap();
         assert!(matches!(t.save(), Err(StoreError::ChangedOnDisk { .. })));
+        assert_eq!(t.disk_change().unwrap(), DiskChange::Changed);
+
+        // Keep mine: the next save replaces their version, which stays in the .bak.
+        t.overwrite_disk_version().unwrap();
+        t.save().unwrap();
+        assert!(t.contains("cat"));
+        assert_eq!(t.disk_change().unwrap(), DiskChange::Unchanged);
+        assert!(std::fs::read_to_string(dir.path().join("tags.json.bak")).unwrap().contains("\"version\":1}"));
+
+        // Load theirs: unsaved changes are dropped.
+        std::fs::write(&p, "{\"format\":\"boorucraft-tags\",\"version\":1,\"tags\":{\"dog\":{}}}").unwrap();
+        t.create("bird", "").unwrap();
+        t.reload().unwrap();
+        assert!(t.contains("dog") && !t.contains("cat") && !t.contains("bird") && !t.is_dirty());
+        assert_eq!(t.disk_change().unwrap(), DiskChange::Unchanged);
+        // A damaged file is not loaded; the list in memory stays.
+        std::fs::write(&p, "{ not json").unwrap();
+        assert!(t.reload().is_err());
+        assert!(t.contains("dog"));
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(t.disk_change().unwrap(), DiskChange::Deleted);
+        assert!(t.reload().is_err());
     }
 
     #[test]

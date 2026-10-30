@@ -4,6 +4,8 @@
 //!   `X.tmp` over `X`. A crash leaves either the old or the new file, never half of one.
 //! - [`Stamp`]: a hash of the bytes last loaded or saved, to notice when another program changed
 //!   the file in between.
+//! - [`disk_change`]: has the file changed since then? Size and modification time first, so the
+//!   usual "no" costs one `stat`.
 //! - [`Lock`]: `X.lock`, holding the process ID and host name, so two BooruCraft instances don't
 //!   overwrite each other. Removed when dropped; a lock left by a crashed process on this machine
 //!   is detected and replaced.
@@ -11,6 +13,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 
@@ -55,6 +58,55 @@ pub fn check_unchanged(path: &Path, expected: Option<Stamp>, max: u64) -> Result
         Ok(now) if now == expected => Ok(()),
         Ok(_) | Err(StoreError::TooLarge { .. }) => Err(StoreError::ChangedOnDisk { path: path.to_path_buf() }),
         Err(e) => Err(e),
+    }
+}
+
+/// Size and modification time of a file: a cheap first test for "has it changed?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Meta {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Meta {
+    /// `None` if the file doesn't exist (or can't be read).
+    pub fn of(path: &Path) -> Option<Meta> {
+        let m = fs::metadata(path).ok()?;
+        Some(Meta { len: m.len(), modified: m.modified().ok() })
+    }
+}
+
+/// How a file on disk compares with the version last loaded or saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskChange {
+    Unchanged,
+    /// Different content (another program wrote it).
+    Changed,
+    /// It existed and is gone now.
+    Deleted,
+}
+
+/// Compares `path` with the version last loaded or saved: `stamp` is its content (`None`: there
+/// was no file) and `meta` its size and time. When only the time changed (touched, or rewritten
+/// with the same bytes), `meta` is updated so the next check is a single `stat` again.
+pub fn disk_change(path: &Path, stamp: Option<Stamp>, meta: &mut Option<Meta>, max: u64) -> Result<DiskChange> {
+    let now = Meta::of(path);
+    if now == *meta {
+        return Ok(DiskChange::Unchanged);
+    }
+    let bytes = match read_capped(path, max) {
+        Ok(b) => b,
+        Err(StoreError::TooLarge { .. }) => return Ok(DiskChange::Changed),
+        Err(e) => return Err(e),
+    };
+    match (bytes, stamp) {
+        (None, None) => Ok(DiskChange::Unchanged),
+        (None, Some(_)) => Ok(DiskChange::Deleted),
+        (Some(b), Some(s)) if Stamp::of(&b) == s => {
+            *meta = now;
+            Ok(DiskChange::Unchanged)
+        }
+        (Some(_), _) => Ok(DiskChange::Changed),
     }
 }
 
@@ -183,6 +235,31 @@ mod tests {
         fs::write(&p, b"changed").unwrap();
         assert!(matches!(check_unchanged(&p, Some(stamp), 100), Err(StoreError::ChangedOnDisk { .. })));
         assert!(matches!(check_unchanged(&dir.path().join("none"), None, 100), Ok(())));
+    }
+
+    #[test]
+    fn notices_changes_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.json");
+        let mut meta = None;
+        assert_eq!(disk_change(&p, None, &mut meta, 100).unwrap(), DiskChange::Unchanged, "still no file");
+        let stamp = write_atomic(&p, b"one", false).unwrap();
+        let mut meta = Meta::of(&p);
+        assert_eq!(disk_change(&p, Some(stamp), &mut meta, 100).unwrap(), DiskChange::Unchanged);
+        // Same bytes written again: only the time differs, and the check learns the new time.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&p, b"one").unwrap();
+        let mut stale = Some(Meta { len: 3, modified: None });
+        assert_eq!(disk_change(&p, Some(stamp), &mut stale, 100).unwrap(), DiskChange::Unchanged);
+        assert_eq!(stale, Meta::of(&p));
+        fs::write(&p, b"two!").unwrap();
+        assert_eq!(disk_change(&p, Some(stamp), &mut meta, 100).unwrap(), DiskChange::Changed);
+        fs::write(&p, [b'x'; 200]).unwrap();
+        assert_eq!(disk_change(&p, Some(stamp), &mut meta, 100).unwrap(), DiskChange::Changed, "too large counts as changed");
+        fs::remove_file(&p).unwrap();
+        assert_eq!(disk_change(&p, Some(stamp), &mut meta, 100).unwrap(), DiskChange::Deleted);
+        fs::write(&p, b"new").unwrap();
+        assert_eq!(disk_change(&p, None, &mut None, 100).unwrap(), DiskChange::Changed, "appeared");
     }
 
     #[test]

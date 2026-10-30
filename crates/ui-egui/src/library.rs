@@ -11,13 +11,22 @@ use std::time::{Duration, Instant};
 use boorucraft_core::{Query, Rating};
 use boorucraft_dedup::Hashes;
 use boorucraft_index::{ScanCache, ScanReport, SidecarReport, find_groups, needing_hashes, scan, set_hashes, sidecar_rel, write_sidecars};
-use boorucraft_store::{Collection, FileEntry, Links, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
+use boorucraft_store::{Collection, DiskChange, FileEntry, Links, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
 use boorucraft_thumbs::ThumbCache;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// How long after the last edit collection.json and the sidecars are saved.
 pub const SAVE_DELAY: Duration = Duration::from_secs(2);
+/// How often collection.json and tags.json are checked for changes made by other programs.
+pub const DISK_CHECK_EVERY: Duration = Duration::from_secs(2);
+
+/// A file another program changed while BooruCraft had unsaved changes to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outside {
+    TagList,
+    Collection(usize),
+}
 
 /// Where the app keeps its own files: [`Dirs::system`] in the app, temporary folders in tests.
 #[derive(Debug, Clone)]
@@ -137,6 +146,9 @@ pub struct OpenCollection {
     /// The last save failed: the changes are still in memory and are saved again later.
     pub save_error: Option<String>,
     pub last_report: Option<String>,
+    /// collection.json was changed by another program while this one had unsaved changes:
+    /// nothing is saved until the user picks a version ([`Library::resolve_outside_change`]).
+    pub outside_change: bool,
 }
 
 impl OpenCollection {
@@ -213,6 +225,9 @@ pub struct Library {
     waker: Arc<dyn Fn() + Send + Sync>,
     /// Moves files to the trash: the system trash in the app.
     pub trasher: Trasher,
+    /// tags.json was changed by another program while this one had unsaved changes.
+    pub tags_outside_change: bool,
+    last_disk_check: Option<Instant>,
 }
 
 fn seed_now() -> u64 {
@@ -271,6 +286,8 @@ impl Library {
             scan_rx,
             waker,
             trasher: Arc::new(|p: &Path| trash::delete(p).map_err(|e| e.to_string())),
+            tags_outside_change: false,
+            last_disk_check: None,
         };
         for root in roots {
             lib.open_collection(&root, false);
@@ -312,6 +329,7 @@ impl Library {
                     sidecars_pending: BTreeSet::new(),
                     save_error: None,
                     last_report: None,
+                    outside_change: false,
                 };
                 if !changed.is_empty() {
                     oc.dirty_since = Some(Instant::now());
@@ -335,6 +353,7 @@ impl Library {
                 sidecars_pending: BTreeSet::new(),
                 save_error: None,
                 last_report: None,
+                outside_change: false,
             });
         } else {
             let idx = self.colls.len() - 1;
@@ -385,7 +404,7 @@ impl Library {
     pub fn start_scan(&mut self, idx: usize) {
         self.flush(idx);
         let Some(oc) = self.colls.get_mut(idx) else { return };
-        if oc.read_only() {
+        if oc.read_only() || oc.outside_change {
             return;
         }
         let CollState::Ready { c, cache } = std::mem::replace(&mut oc.state, CollState::Scanning) else { return };
@@ -558,10 +577,169 @@ impl Library {
         if self.poll_hashes() {
             changed = true;
         }
+        if self.last_disk_check.is_none_or(|t| t.elapsed() >= DISK_CHECK_EVERY) && self.check_outside_changes() {
+            changed = true;
+        }
         if !self.is_busy() {
             self.start_hashing();
         }
         changed
+    }
+
+    /// Looks for changes other programs made to tags.json and each collection.json (a sync
+    /// tool, a text editor, a restored backup). A changed file is reloaded unless BooruCraft
+    /// has unsaved changes to it: then nothing is saved until the user picks a version. A
+    /// deleted one is written again. Returns true if the results may have changed.
+    pub fn check_outside_changes(&mut self) -> bool {
+        self.last_disk_check = Some(Instant::now());
+        let mut changed = false;
+        if !self.tags_outside_change {
+            match self.tags.disk_change() {
+                Ok(DiskChange::Changed) if !self.tags.is_dirty() => match self.reload_tags() {
+                    Ok(()) => {
+                        self.notify("The tag list was changed outside BooruCraft; reloaded it");
+                        changed = true;
+                    }
+                    Err(e) => {
+                        self.tags_outside_change = true;
+                        self.notify(format!("The tag list was changed outside BooruCraft, but couldn't be read: {e}"));
+                    }
+                },
+                Ok(DiskChange::Changed) => {
+                    self.tags_outside_change = true;
+                    self.notify("The tag list was changed outside BooruCraft while this window had unsaved changes");
+                }
+                Ok(DiskChange::Deleted) if !self.tags.is_read_only() => {
+                    let saved = self.tags.overwrite_disk_version().and_then(|()| self.tags.save());
+                    self.notify(match saved {
+                        Ok(()) => "The tag list was deleted outside BooruCraft; saved it again".to_string(),
+                        Err(e) => format!("The tag list was deleted outside BooruCraft, and saving it again failed: {e}"),
+                    });
+                }
+                _ => {}
+            }
+        }
+        for i in 0..self.colls.len() {
+            let (name, change, unsaved, read_only) = {
+                let Some(oc) = self.colls.get_mut(i) else { continue };
+                if oc.outside_change {
+                    continue;
+                }
+                let CollState::Ready { c, .. } = &mut oc.state else { continue };
+                (oc.name.clone(), c.disk_change(), c.is_dirty(), c.is_read_only())
+            };
+            match change {
+                Ok(DiskChange::Changed) if !unsaved => match self.reload_collection(i) {
+                    Ok(()) => {
+                        self.notify(format!("{name}: collection.json was changed outside BooruCraft; reloaded it"));
+                        changed = true;
+                    }
+                    Err(e) => {
+                        if let Some(oc) = self.colls.get_mut(i) {
+                            oc.outside_change = true;
+                        }
+                        self.notify(format!("{name}: collection.json was changed outside BooruCraft, but couldn't be read: {e}"));
+                    }
+                },
+                Ok(DiskChange::Changed) => {
+                    if let Some(oc) = self.colls.get_mut(i) {
+                        oc.outside_change = true;
+                    }
+                    self.notify(format!("{name}: collection.json was changed outside BooruCraft while this window had unsaved changes"));
+                }
+                Ok(DiskChange::Deleted) if !read_only => {
+                    let result = match self.colls.get_mut(i) {
+                        Some(OpenCollection { state: CollState::Ready { c, .. }, dirty_since, .. }) => {
+                            let r = c.overwrite_disk_version();
+                            if r.is_ok() {
+                                *dirty_since = Some(Instant::now());
+                            }
+                            r.map_err(|e| e.to_string())
+                        }
+                        _ => Err("the collection is busy".into()),
+                    };
+                    self.flush(i);
+                    self.notify(match result {
+                        Ok(()) => format!("{name}: collection.json was deleted outside BooruCraft; saved it again"),
+                        Err(e) => format!("{name}: collection.json was deleted outside BooruCraft: {e}"),
+                    });
+                }
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    /// Settles a file changed outside BooruCraft while it had unsaved changes: keep the
+    /// version in memory (the other one stays in the `.bak`) or load the one on disk.
+    pub fn resolve_outside_change(&mut self, which: Outside, keep_mine: bool) {
+        let result = match which {
+            Outside::TagList if keep_mine => self.tags.overwrite_disk_version().and_then(|()| self.tags.save()).map_err(|e| e.to_string()),
+            Outside::TagList => self.reload_tags(),
+            Outside::Collection(i) if keep_mine => {
+                let Some(oc) = self.colls.get_mut(i) else { return };
+                let CollState::Ready { c, .. } = &mut oc.state else { return };
+                let r = c.overwrite_disk_version().map_err(|e| e.to_string());
+                if r.is_ok() {
+                    oc.dirty_since = Some(Instant::now());
+                    oc.outside_change = false;
+                    self.flush(i);
+                }
+                r
+            }
+            Outside::Collection(i) => self.reload_collection(i),
+        };
+        match (result, which) {
+            (Ok(()), Outside::TagList) => self.tags_outside_change = false,
+            (Ok(()), Outside::Collection(i)) => {
+                if let Some(oc) = self.colls.get_mut(i) {
+                    oc.outside_change = false;
+                }
+            }
+            (Err(e), _) => self.notify(format!("Couldn't do that: {e}")),
+        }
+    }
+
+    /// Loads tags.json from disk again and brings the open collections up to date with it.
+    fn reload_tags(&mut self) -> Result<(), String> {
+        self.tags.reload().map_err(|e| e.to_string())?;
+        for oc in &mut self.colls {
+            let CollState::Ready { c, .. } = &mut oc.state else { continue };
+            let changed = c.apply_tag_history(&self.tags);
+            if !changed.is_empty() {
+                oc.index = SearchIndex::build(c);
+                oc.dirty_since = Some(Instant::now());
+                oc.sidecars_pending.extend(changed);
+            }
+        }
+        self.usage = None;
+        Ok(())
+    }
+
+    /// Loads a collection.json from disk again (dropping unsaved changes), then rewrites the
+    /// sidecars of files whose tags, rating or source differ from before.
+    fn reload_collection(&mut self, i: usize) -> Result<(), String> {
+        let Some(oc) = self.colls.get_mut(i) else { return Err("no such collection".into()) };
+        let CollState::Ready { c, .. } = &mut oc.state else { return Err("the collection is busy".into()) };
+        let before: HashMap<String, FileEntry> = c.files().map(|(h, e)| (h.to_string(), e.clone())).collect();
+        c.reload().map_err(|e| e.to_string())?;
+        let mut touched: BTreeSet<String> = c.apply_tag_history(&self.tags);
+        for (h, e) in c.files() {
+            let old = before.get(h);
+            if old.is_none_or(|o| o.tags != e.tags || o.rating != e.rating || o.source != e.source) {
+                touched.insert(h.to_string());
+            }
+        }
+        oc.index = SearchIndex::build(c);
+        oc.save_error = None;
+        oc.outside_change = false;
+        if !touched.is_empty() {
+            oc.sidecars_pending.extend(touched);
+            oc.dirty_since = Some(Instant::now());
+        }
+        self.usage = None;
+        self.dupes_stale = true;
+        Ok(())
     }
 
     /// Runs a query over every ready collection, sorted by its `order:` (default: newest
@@ -1188,7 +1366,7 @@ impl Library {
     /// Saves one collection and writes its pending sidecars now.
     pub fn flush(&mut self, idx: usize) {
         let Some(oc) = self.colls.get_mut(idx) else { return };
-        if oc.dirty_since.is_none() && oc.save_error.is_none() {
+        if (oc.dirty_since.is_none() && oc.save_error.is_none()) || oc.outside_change {
             return;
         }
         let CollState::Ready { c, cache } = &mut oc.state else { return };
@@ -1424,6 +1602,99 @@ mod tests {
         assert_eq!(lib.hits.len(), 1);
         lib.search("blue_sky -rating:s");
         assert_eq!(lib.hits.len(), 1);
+    }
+
+    #[test]
+    fn outside_changes_are_reloaded_or_settled_by_the_user() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        picture(&pics.join("a.png"), 10);
+        let mut lib = library(tmp.path(), &pics);
+        lib.create_tag("cat");
+        lib.create_tag("dog");
+        lib.search("");
+        let all = lib.hits.clone();
+        lib.edit_tags(&all, &["cat".into()], &[]);
+        lib.flush_all();
+        assert!(!lib.check_outside_changes(), "our own saves aren't outside changes");
+        let json = pics.join("collection.json");
+
+        // No unsaved changes here: their version is loaded, and the sidecar follows it.
+        let edited = std::fs::read_to_string(&json).unwrap().replace("\"cat\"", "\"dog\"");
+        std::fs::write(&json, &edited).unwrap();
+        assert!(lib.check_outside_changes());
+        lib.search("dog");
+        assert_eq!(lib.hits.len(), 1);
+        lib.flush_all();
+        assert!(std::fs::read_to_string(pics.join("a.png.xmp")).unwrap().contains("dog"));
+
+        // Both sides changed: nothing is saved until the user chooses.
+        lib.edit_tags(&all, &["cat".into()], &[]);
+        std::fs::write(&json, edited.replace("\"dog\"", "\"dog\", \"theirs\"")).unwrap();
+        lib.check_outside_changes();
+        assert!(lib.colls[0].outside_change);
+        lib.flush_all();
+        assert!(std::fs::read_to_string(&json).unwrap().contains("theirs"), "not saved over");
+        lib.resolve_outside_change(Outside::Collection(0), true);
+        assert!(!lib.colls[0].outside_change);
+        let saved = std::fs::read_to_string(&json).unwrap();
+        assert!(saved.contains("\"cat\"") && !saved.contains("theirs"), "{saved}");
+        assert!(std::fs::read_to_string(pics.join("collection.json.bak")).unwrap().contains("theirs"));
+
+        // Again, but load theirs this time.
+        lib.edit_tags(&all, &[], &["cat".into()]);
+        std::fs::write(&json, saved.replace("\"dog\"", "\"dog\", \"theirs\"")).unwrap();
+        lib.check_outside_changes();
+        lib.resolve_outside_change(Outside::Collection(0), false);
+        assert!(!lib.colls[0].outside_change);
+        lib.flush_all();
+        assert!(!lib.has_unsaved());
+        assert!(std::fs::read_to_string(pics.join("a.png.xmp")).unwrap().contains("theirs"), "sidecars follow the loaded version");
+        lib.search("cat theirs");
+        assert_eq!(lib.hits.len(), 1, "their version, with cat still on it");
+
+        // A damaged file isn't loaded; the user is asked instead.
+        std::fs::write(&json, "{ broken").unwrap();
+        lib.check_outside_changes();
+        assert!(lib.colls[0].outside_change);
+        lib.resolve_outside_change(Outside::Collection(0), false);
+        assert!(lib.colls[0].outside_change, "can't load a damaged file");
+        lib.resolve_outside_change(Outside::Collection(0), true);
+        assert!(!lib.colls[0].outside_change);
+        assert!(std::fs::read_to_string(&json).unwrap().contains("boorucraft-collection"));
+
+        // Deleted: written again.
+        std::fs::remove_file(&json).unwrap();
+        lib.check_outside_changes();
+        assert!(std::fs::read_to_string(&json).unwrap().contains("theirs"));
+
+        // The tag list, edited by hand: a rename with its history entry reaches the files.
+        let tags_path = tmp.path().join("cfg/tags.json");
+        let mut list: serde_json::Value = serde_json::from_slice(&std::fs::read(&tags_path).unwrap()).unwrap();
+        let rev = list["revision"].as_u64().unwrap() + 1;
+        list["revision"] = rev.into();
+        let tags = list["tags"].as_object_mut().unwrap();
+        let info = tags.remove("dog").unwrap();
+        tags.insert("hound".into(), info);
+        list["history"].as_array_mut().unwrap().push(serde_json::json!({"revision": rev, "op": "rename", "from": "dog", "to": "hound"}));
+        std::fs::write(&tags_path, serde_json::to_vec_pretty(&list).unwrap()).unwrap();
+        assert!(lib.check_outside_changes());
+        assert!(lib.tags.contains("hound") && !lib.tags.contains("dog"));
+        lib.search("hound");
+        assert_eq!(lib.hits.len(), 1);
+        lib.flush_all();
+        assert!(std::fs::read_to_string(pics.join("a.png.xmp")).unwrap().contains("hound"));
+
+        // Unsaved tag list changes and an outside edit: the user chooses.
+        let mut theirs: serde_json::Value = serde_json::from_slice(&std::fs::read(&tags_path).unwrap()).unwrap();
+        theirs["tags"].as_object_mut().unwrap().insert("owl".into(), serde_json::json!({}));
+        lib.tags.create("parrot", "").unwrap();
+        std::fs::write(&tags_path, serde_json::to_vec_pretty(&theirs).unwrap()).unwrap();
+        lib.check_outside_changes();
+        assert!(lib.tags_outside_change);
+        lib.resolve_outside_change(Outside::TagList, false);
+        assert!(!lib.tags_outside_change && lib.tags.contains("owl") && !lib.tags.contains("parrot"));
     }
 
     #[test]
