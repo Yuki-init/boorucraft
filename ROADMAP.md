@@ -2,7 +2,8 @@
 
 **Stage:** pre-alpha. The desktop app opens folders, shows a thumbnail grid and a viewer, searches
 with the full booru syntax (tags, metatags, `order:`), edits tags (saved to `collection.json` and XMP sidecars),
-finds and reviews near-duplicates, and groups files into pools and families of versions. Design:
+finds and reviews near-duplicates, groups files into pools and families of versions, follows tag
+aliases and implications, watches folders for outside changes, and shows video thumbnails. Design:
 [docs/design.md](docs/design.md). Ranked work list: [docs/gaps.md](docs/gaps.md).
 
 | Milestone | Goal | Status |
@@ -12,7 +13,8 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 | M2 | Full search syntax (negation, OR, wildcards, every metatag, `order:`), error underline, autocomplete, tag sidebar with counts, namespaces and colours | done |
 | M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates); grouping: parent/child links and pools, stacked in the grid | done |
 | M4 | File watching, reload on outside changes, missing-file handling, Tags screen (rename/merge/delete across all collections, catch-up for closed ones), Unknown tags review, reading back sidecars edited by other apps, rebuild from sidecars, saved searches, slideshow | done |
-| Later | Tag aliases and implications; import tags from boorus by MD5; local ML auto-tagger; video thumbnails via PlayCraft's Rust decoders | |
+| Polish | Scan progress, preloading in the viewer, video thumbnails (FilmCraft's decoders), tag aliases and implications | done |
+| Later | Import tags from boorus by MD5; local ML auto-tagger | |
 
 ## Progress log
 

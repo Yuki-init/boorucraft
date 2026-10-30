@@ -2,8 +2,10 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **Later** (ROADMAP): tag aliases and implications; importing tags from boorus by MD5; a local
-   auto-tagger.
+1. **Booru import** (Later): look files up by MD5 on Safebooru, Gelbooru or Danbooru and import
+   their tags and ratings (pure-Rust HTTPS: rustls with the RustCrypto provider; an honest user
+   agent, no bot-protection workarounds; API keys only where a site needs them).
+2. **Auto-tagger** (Later): a local ML tagger, in Rust.
 
 ## Known limitations
 

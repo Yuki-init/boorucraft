@@ -11,13 +11,16 @@ then find them with searches like `artist:foo cat -dog rating:s width:>1920 orde
 - One central tag list keeps tags consistent across all your collections.
 - Booru-style search with negation, OR, wildcards, namespaces and metatags (size, type, date,
   rating, tag count and more).
+- Tag aliases (`nekomimi` → `cat_ears`) and implications (`cat_ears` → `animal_ears`).
 - Finds exact and near-duplicate pictures.
-- Videos and formats it can't show itself (AVIF, HEIC…) are tagged and searched too, and open
-  in your system's default app.
+- Watches your folders: files added, moved or tagged by other apps show up on their own.
+- Slideshow and fullscreen viewer; saved searches.
+- Videos get thumbnails (FilmCraft's pure-Rust decoders: H.264, HEVC, VP9, AV1, MPEG-2…) and
+  play in your system's media player. Formats it can't show itself (AVIF, HEIC…) are tagged
+  and searched too, and open in your default app.
 - Rust libraries only, egui desktop UI.
 
-Status: pre-alpha; the desktop app and the command-line tool work (grid, viewer, tag search,
-tag editing). See
+Status: pre-alpha; the desktop app and the command-line tool work. See
 [ROADMAP.md](ROADMAP.md) and [docs/design.md](docs/design.md).
 
 ## Try it
@@ -35,7 +38,8 @@ scripts/screenshot.sh .cache/shot.png --collection .cache/sample --query "cat -d
 ```
 
 In the app: `/` search, arrows move, `Enter` opens, `Esc` goes back, `t` edits tags, `1`/`2`/`3`
-set the rating (`0` clears it), `o` opens the file in your default app.
+set the rating (`0` clears it), `o` opens the file in your default app, `s` starts a slideshow,
+`F11` toggles fullscreen.
 
 ```text
 boorucraft-cli scan DIR                         index a folder (creates DIR/collection.json)

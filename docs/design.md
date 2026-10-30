@@ -338,7 +338,7 @@ HEIC's container.
 | `order:date` `order:-date` `order:filesize` `order:name` `order:random` | sort order, one per search |
 
 Values with spaces go in double quotes. Calendar dates are in UTC, the same way EXIF times are
-stored. Files without a value (e.g. videos PlayCraft can't read) never match a numeric filter and sort last.
+stored. Files without a value (e.g. videos FilmCraft can't read) never match a numeric filter and sort last.
 
 `order:` keys: `imported` (the default), `date`, `filesize`, `width`, `height`, `mpixels`,
 `ratio`, `tagcount`, `name`, `path`, `random`. Without a sign they sort largest or newest first,
