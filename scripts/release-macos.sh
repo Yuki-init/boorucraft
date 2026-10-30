@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build the macOS release files on a Mac and add them to a draft GitHub release.
+# Build the macOS release files on a Mac and add them to its GitHub release.
 #
 #   scripts/release-macos.sh [VERSION]
 #
 # The Release workflow builds every other platform and drafts release vVERSION (VERSION defaults
 # to Cargo.toml's; give the one a test run used, e.g. 0.1.0-rc.1). This script builds the commit
-# that draft points at, in a temporary git worktree, with packaging/macos/package.sh (a universal
-# .app on a DMG, and a CLI zip), then uploads both to the draft and adds them to SHA256SUMS.txt.
+# that release points at (best before publishing it, but a published one works too), in a temporary git worktree, with packaging/macos/package.sh (a universal
+# .app on a DMG, and a CLI zip), then uploads both to the release and adds them to SHA256SUMS.txt.
 #
 # Needs, on the Mac: Xcode command-line tools, rustup with both Apple targets
 # (`rustup target add aarch64-apple-darwin x86_64-apple-darwin` for the toolchain the build uses),
@@ -31,15 +31,19 @@ cargo_version() { (unset VERSION BOORUCRAFT_VERSION; . "$1/packaging/env.sh" >/d
 VERSION="${1:-$(cargo_version "$ROOT")}"
 TAG="v$VERSION"
 
-# The draft must exist: the Release workflow makes it.
-draft="$(gh release view "$TAG" -R "$REPO" --json isDraft --jq .isDraft 2>/dev/null)" \
+# The release must exist: the Release workflow drafts it. Usually it is still a draft; a
+# published one is built from its tag.
+gh release view "$TAG" -R "$REPO" --json isDraft >/dev/null 2>&1 \
   || fail "no release $TAG in $REPO: run the Release workflow first"
-[[ "$draft" = true ]] || fail "$TAG is already published; macOS files go on the draft before publishing"
 COMMIT="$(gh release view "$TAG" -R "$REPO" --json targetCommitish --jq .targetCommitish)"
-[[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "draft $TAG points at '$COMMIT', not a commit"
+if [[ ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  # Published: the tag names the commit.
+  COMMIT="$(git -C "$ROOT" ls-remote origin "refs/tags/$TAG^{}" "refs/tags/$TAG" | awk 'NR == 1 { print $1 }')"
+fi
+[[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "can't tell which commit $TAG was built from"
 echo "==> BooruCraft $VERSION for macOS, from $COMMIT"
 
-git -C "$ROOT" fetch -q origin "$COMMIT" 2>/dev/null || git -C "$ROOT" fetch -q origin
+git -C "$ROOT" fetch -q origin "$COMMIT" 2>/dev/null || git -C "$ROOT" fetch -q --tags origin
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/boorucraft-macos.XXXXXX")"
 cleanup() { git -C "$ROOT" worktree remove --force "$WORK/src" 2>/dev/null || true; rm -rf "$WORK"; }
 trap cleanup EXIT
@@ -73,6 +77,6 @@ for f in "${files[@]}"; do
   mv "$sums.new" "$sums"
 done
 gh release upload "$TAG" -R "$REPO" --clobber "$sums"
-echo "==> added to draft $TAG:"
+echo "==> added to $TAG:"
 for f in "${files[@]}"; do echo "    $(basename "$f")"; done
-echo "Publish it on GitHub once you have checked it: https://github.com/$REPO/releases"
+echo "https://github.com/$REPO/releases (publish it there if it is still a draft)"
