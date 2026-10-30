@@ -91,3 +91,7 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   when there are no unsaved changes (sidecars follow; tag-list renames in `history` reach open
   collections); otherwise saving stops and the collection card asks "Keep mine" / "Load theirs".
   Deleted files are written again; damaged ones are never loaded.
+- 2026-10-30 — M4.2: file watching (`notify`, in `index`): collection folders and the tag list's
+  folder are watched; `index::classify` ignores BooruCraft's own writes (checked against the
+  scan cache) and starts an incremental rescan 1 s after a real change: pictures added, edited,
+  moved or deleted, folders, and sidecars edited by other apps (read back as before).

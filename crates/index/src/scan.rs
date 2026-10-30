@@ -45,7 +45,7 @@ struct Found {
     ext: String,
 }
 
-fn extensions(c: &Collection) -> BTreeSet<String> {
+pub(crate) fn extensions(c: &Collection) -> BTreeSet<String> {
     let custom = &c.settings().extensions;
     if custom.is_empty() {
         IMAGE_EXTENSIONS.iter().chain(VIDEO_EXTENSIONS).map(|e| e.to_string()).collect()

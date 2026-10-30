@@ -45,7 +45,8 @@ every file has tags, and you find files by searching tags and other properties.
 Crates: `serde` + `serde_json`, `sha2`, `md-5`, `quick-xml`, `roaring`, `walkdir`, `rayon`,
 `imagesize`, `kamadak-exif`, `chrono`, `thiserror` (since M0); `eframe`/`egui` (wgpu), `image`
 (JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI), `jxl-oxide`, `open`, `rfd` (since M1); `trash` (since M3; on Linux it is plain Rust over the
-freedesktop.org trash folders); planned: `notify`.
+freedesktop.org trash folders); `notify` (since M4; inotify on Linux through FFI declarations,
+no C compiled).
 
 ## Workspace layout
 
@@ -249,7 +250,14 @@ Edits update the indexes and mark the collection and the affected sidecars dirty
    placeholders until each is ready.
 6. Sidecars: a newer-than-expected `.xmp` is read back (see XMP sidecars); a tagged file without
    one gets it written.
-7. While the app runs, `notify` watches the folder and queues changed paths for steps 2–6.
+7. While the app runs, `notify` watches each collection folder (and the tag list's folder).
+   Each reported path is classified (`index::classify`): BooruCraft's own writes are ignored
+   (temp files, `collection.json.*`, sidecars whose mtime matches the one recorded after writing
+   them, pictures whose size and mtime match the scan cache), as are hidden paths and files of
+   other types; `collection.json` triggers the outside-change check; anything else schedules a
+   rescan 1 s after the first change (changes meanwhile join it). The rescan is the normal
+   incremental scan, so only changed files are hashed. Paths reported during a scan wait for it
+   to finish. Read-only collections are not rescanned.
 
 Which files are included: known picture and video extensions by default (jpg, png, gif, webp,
 bmp, tiff, jxl, avif, heic, mp4, webm, mkv, mov…). The list is configurable per collection.

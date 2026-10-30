@@ -222,3 +222,54 @@ fn duplicate_groups_span_collections() {
     assert!(find_groups(&[Some(&one), None, Some(&two)], 8).is_empty(), "a parent and its child aren't duplicates");
     assert!(needing_hashes(&one).is_empty(), "files that aren't on disk can't be hashed");
 }
+
+#[test]
+fn watch_events_are_classified() {
+    use crate::{Relevance, classify};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "a.png", &png(10, 20));
+    write(root, "sub/b.png", &png(11, 20));
+    let tags = tag_list();
+    let mut cache = ScanCache::in_memory();
+    let mut c = Collection::open(root).unwrap();
+    scan(&mut c, &tags, &mut cache);
+    let a = hash_at(&c, "a.png");
+    c.edit_tags(&a, &["cat"], &[], &tags).unwrap();
+    let mut report = crate::SidecarReport::default();
+    write_sidecars(&c, &tags, [a.as_str()], &mut cache, &mut report);
+    c.save().unwrap();
+    let root = c.root().to_path_buf();
+    let is = |p: &str| classify(&c, &cache, &root.join(p));
+
+    // BooruCraft's own files and writes.
+    assert_eq!(is("collection.json"), Relevance::CollectionFile);
+    for own in ["collection.json.bak", "collection.json.lock", "collection.json.tmp", "a.png.xmp.tmp", "a.png.xmp", "a.png"] {
+        assert_eq!(is(own), Relevance::Ignore, "{own}");
+    }
+    // Not part of the collection.
+    write(&root, "notes.txt", b"x");
+    write(&root, ".thumbs/c.png", &png(1, 1));
+    assert_eq!(is("notes.txt"), Relevance::Ignore);
+    assert_eq!(is(".thumbs/c.png"), Relevance::Ignore);
+    assert_eq!(is("never-there.png"), Relevance::Ignore);
+    assert_eq!(classify(&c, &cache, Path::new("/elsewhere/x.png")), Relevance::Ignore);
+
+    // Real changes.
+    write(&root, "new.png", &png(12, 20));
+    assert_eq!(is("new.png"), Relevance::Rescan, "new picture");
+    write(&root, "a.png", &png(10, 21));
+    bump_mtime(&root.join("a.png"), 5);
+    assert_eq!(is("a.png"), Relevance::Rescan, "edited picture");
+    fs::write(root.join("a.png.xmp"), b"<x:xmpmeta/>").unwrap();
+    bump_mtime(&root.join("a.png.xmp"), 9);
+    assert_eq!(is("a.png.xmp"), Relevance::Rescan, "sidecar edited by another app");
+    fs::remove_file(root.join("sub/b.png")).unwrap();
+    assert_eq!(is("sub/b.png"), Relevance::Rescan, "known picture deleted");
+    fs::create_dir(root.join("moved-in")).unwrap();
+    assert_eq!(is("moved-in"), Relevance::Rescan, "folder appeared");
+    fs::remove_dir_all(root.join("sub")).unwrap();
+    assert_eq!(is("sub"), Relevance::Rescan, "folder with known files gone");
+    assert_eq!(is("gone-empty-folder"), Relevance::Ignore);
+    assert_eq!(classify(&c, &cache, &root), Relevance::Rescan, "the root itself (e.g. an overflow)");
+}

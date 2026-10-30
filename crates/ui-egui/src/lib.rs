@@ -1147,8 +1147,12 @@ impl eframe::App for App {
         if self.lib.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
-        // Wake up now and then to notice files changed by other programs.
-        ctx.request_repaint_after(library::DISK_CHECK_EVERY);
+        if let Some(wait) = self.lib.rescan_due() {
+            ctx.request_repaint_after(wait);
+        }
+        // Watched folders wake the window themselves; checking now and then also catches
+        // changes the watcher can't see (network drives) or when watching isn't available.
+        ctx.request_repaint_after(if self.lib.is_watching() { Duration::from_secs(10) } else { library::DISK_CHECK_EVERY });
     }
 
     fn on_exit(&mut self) {

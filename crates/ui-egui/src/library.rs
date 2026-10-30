@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use boorucraft_core::{Query, Rating};
 use boorucraft_dedup::Hashes;
-use boorucraft_index::{ScanCache, ScanReport, SidecarReport, find_groups, needing_hashes, scan, set_hashes, sidecar_rel, write_sidecars};
+use boorucraft_index::{
+    FolderWatcher, Relevance, ScanCache, ScanReport, SidecarReport, classify, find_groups, needing_hashes, scan, set_hashes, sidecar_rel, write_sidecars,
+};
 use boorucraft_store::{Collection, DiskChange, FileEntry, Links, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
 use boorucraft_thumbs::ThumbCache;
 use rayon::prelude::*;
@@ -20,6 +22,11 @@ use serde::{Deserialize, Serialize};
 pub const SAVE_DELAY: Duration = Duration::from_secs(2);
 /// How often collection.json and tags.json are checked for changes made by other programs.
 pub const DISK_CHECK_EVERY: Duration = Duration::from_secs(2);
+/// How long after the first change in a watched folder it is scanned again (changes that
+/// arrive meanwhile join the same scan).
+pub const WATCH_DELAY: Duration = Duration::from_secs(1);
+/// Changed paths kept per collection until they are looked at; beyond this, just rescan.
+const MAX_PENDING: usize = 10_000;
 
 /// A file another program changed while BooruCraft had unsaved changes to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +156,10 @@ pub struct OpenCollection {
     /// collection.json was changed by another program while this one had unsaved changes:
     /// nothing is saved until the user picks a version ([`Library::resolve_outside_change`]).
     pub outside_change: bool,
+    /// Paths the folder watcher reported, looked at once the collection is ready.
+    watch_pending: Vec<PathBuf>,
+    /// A rescan is due then, because files changed.
+    pub rescan_at: Option<Instant>,
 }
 
 impl OpenCollection {
@@ -228,6 +239,9 @@ pub struct Library {
     /// tags.json was changed by another program while this one had unsaved changes.
     pub tags_outside_change: bool,
     last_disk_check: Option<Instant>,
+    /// `None` if the system offers no file watching; changes are then found by Rescan.
+    watcher: Option<FolderWatcher>,
+    watch_rx: Receiver<Vec<PathBuf>>,
 }
 
 fn seed_now() -> u64 {
@@ -243,7 +257,25 @@ impl Library {
     pub fn new(dirs: Dirs, config: Config, session_collections: Option<Vec<PathBuf>>, waker: Arc<dyn Fn() + Send + Sync>) -> Library {
         let (scan_tx, scan_rx) = channel();
         let (hash_tx, hash_rx) = channel();
+        let (watch_tx, watch_rx) = channel();
         let mut messages = Vec::new();
+        let wake = Arc::clone(&waker);
+        let watcher = match FolderWatcher::new(move |paths| {
+            let _ = watch_tx.send(paths);
+            wake();
+        }) {
+            Ok(mut w) => {
+                // The tag list's folder, for outside changes to tags.json.
+                if let Some(dir) = dirs.tags.parent().filter(|d| d.is_dir()) {
+                    let _ = w.watch(dir, false);
+                }
+                Some(w)
+            }
+            Err(e) => {
+                messages.push((format!("Folders can't be watched for changes ({e}); use Rescan after changing files"), Instant::now()));
+                None
+            }
+        };
         let path = dirs.tags.clone();
         let tags = match TagList::open(&path) {
             Ok(t) => t,
@@ -288,6 +320,8 @@ impl Library {
             trasher: Arc::new(|p: &Path| trash::delete(p).map_err(|e| e.to_string())),
             tags_outside_change: false,
             last_disk_check: None,
+            watcher,
+            watch_rx,
         };
         for root in roots {
             lib.open_collection(&root, false);
@@ -330,10 +364,17 @@ impl Library {
                     save_error: None,
                     last_report: None,
                     outside_change: false,
+                    watch_pending: Vec::new(),
+                    rescan_at: None,
                 };
                 if !changed.is_empty() {
                     oc.dirty_since = Some(Instant::now());
                     oc.sidecars_pending.extend(changed);
+                }
+                if let Some(w) = &mut self.watcher
+                    && let Err(e) = w.watch(&root, true)
+                {
+                    self.messages.push((format!("{}: changes won't be noticed until Rescan ({e})", oc.name), Instant::now()));
                 }
                 self.colls.push(oc);
                 self.usage = None;
@@ -354,6 +395,8 @@ impl Library {
                 save_error: None,
                 last_report: None,
                 outside_change: false,
+                watch_pending: Vec::new(),
+                rescan_at: None,
             });
         } else {
             let idx = self.colls.len() - 1;
@@ -373,6 +416,9 @@ impl Library {
         }
         self.flush(idx);
         let oc = self.colls.remove(idx);
+        if let Some(w) = &mut self.watcher {
+            w.unwatch(&oc.root);
+        }
         self.usage = None;
         self.dupes_stale = true;
         self.config.collections.retain(|p| *p != oc.root);
@@ -577,6 +623,7 @@ impl Library {
         if self.poll_hashes() {
             changed = true;
         }
+        self.take_watch_events();
         if self.last_disk_check.is_none_or(|t| t.elapsed() >= DISK_CHECK_EVERY) && self.check_outside_changes() {
             changed = true;
         }
@@ -584,6 +631,71 @@ impl Library {
             self.start_hashing();
         }
         changed
+    }
+
+    /// True if folders are watched for changes.
+    pub fn is_watching(&self) -> bool {
+        self.watcher.is_some()
+    }
+
+    /// Sorts the paths the watcher reported to their collections, and starts rescans that are
+    /// due. Paths of a collection that is scanning wait until the scan is back.
+    fn take_watch_events(&mut self) {
+        let now = Instant::now();
+        while let Ok(paths) = self.watch_rx.try_recv() {
+            for p in paths {
+                if p == self.dirs.tags {
+                    self.last_disk_check = None;
+                    continue;
+                }
+                // The innermost collection holding the path.
+                let Some(oc) = self.colls.iter_mut().filter(|oc| p.starts_with(&oc.root)).max_by_key(|oc| oc.root.as_os_str().len()) else { continue };
+                if oc.watch_pending.len() < MAX_PENDING {
+                    oc.watch_pending.push(p);
+                } else {
+                    oc.rescan_at.get_or_insert(now + WATCH_DELAY);
+                }
+            }
+        }
+        let mut check_disk = false;
+        let mut due = Vec::new();
+        for (i, oc) in self.colls.iter_mut().enumerate() {
+            let CollState::Ready { c, cache } = &oc.state else { continue };
+            if oc.outside_change {
+                continue;
+            }
+            for p in std::mem::take(&mut oc.watch_pending) {
+                match classify(c, cache, &p) {
+                    Relevance::Ignore => {}
+                    Relevance::CollectionFile => check_disk = true,
+                    // Read-only collections (open in another BooruCraft) are never scanned here.
+                    Relevance::Rescan if c.is_read_only() => {}
+                    Relevance::Rescan => {
+                        oc.rescan_at.get_or_insert(now + WATCH_DELAY);
+                    }
+                }
+            }
+            if oc.rescan_at.is_some_and(|t| t <= now) {
+                oc.rescan_at = None;
+                due.push(i);
+            }
+        }
+        if check_disk {
+            self.last_disk_check = None;
+        }
+        for i in due {
+            self.start_scan(i);
+        }
+    }
+
+    /// How long until a rescan caused by file changes is due.
+    pub fn rescan_due(&self) -> Option<Duration> {
+        self.colls
+            .iter()
+            .filter(|oc| !oc.outside_change && matches!(oc.state, CollState::Ready { .. }))
+            .filter_map(|oc| oc.rescan_at)
+            .min()
+            .map(|t| t.saturating_duration_since(Instant::now()))
     }
 
     /// Looks for changes other programs made to tags.json and each collection.json (a sync
@@ -1695,6 +1807,60 @@ mod tests {
         assert!(lib.tags_outside_change);
         lib.resolve_outside_change(Outside::TagList, false);
         assert!(!lib.tags_outside_change && lib.tags.contains("owl") && !lib.tags.contains("parrot"));
+    }
+
+    /// Polls until `done` holds, failing after a few seconds.
+    fn poll_until(lib: &mut Library, what: &str, done: impl Fn(&Library) -> bool) {
+        let start = Instant::now();
+        loop {
+            lib.poll();
+            if done(lib) {
+                return;
+            }
+            assert!(start.elapsed() < Duration::from_secs(15), "timed out waiting for: {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn watched_folders_are_rescanned_but_not_for_our_own_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        picture(&pics.join("a.png"), 10);
+        let mut lib = library(tmp.path(), &pics);
+        assert!(lib.is_watching());
+        let files = |lib: &Library| lib.colls[0].collection().map_or(0, |c| c.files().filter(|(_, e)| !e.missing).count());
+
+        // A picture copied in, and one in a new folder.
+        picture(&pics.join("b.png"), 120);
+        std::fs::create_dir(pics.join("sub")).unwrap();
+        picture(&pics.join("sub/c.png"), 240);
+        poll_until(&mut lib, "new pictures found", |l| !l.is_busy() && files(l) == 3);
+
+        // Our own edits and saves (collection.json, sidecars) cause no rescan.
+        lib.create_tag("cat");
+        lib.search("");
+        let all = lib.hits.clone();
+        lib.edit_tags(&all, &["cat".into()], &[]);
+        lib.flush_all();
+        assert!(pics.join("a.png.xmp").exists());
+        let quiet = Instant::now();
+        while quiet.elapsed() < WATCH_DELAY * 2 {
+            lib.poll();
+            assert!(lib.colls[0].rescan_at.is_none() && !lib.is_scanning(), "rescanned after our own save");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // A deleted picture is marked missing.
+        std::fs::remove_file(pics.join("sub/c.png")).unwrap();
+        poll_until(&mut lib, "deletion noticed", |l| !l.is_busy() && files(l) == 2);
+
+        // Another app adds a keyword to a sidecar: read back.
+        lib.create_tag("dog");
+        let xmp = std::fs::read_to_string(pics.join("a.png.xmp")).unwrap();
+        std::fs::write(pics.join("a.png.xmp"), xmp.replacen("<rdf:li>cat</rdf:li>", "<rdf:li>cat</rdf:li><rdf:li>dog</rdf:li>", 1)).unwrap();
+        poll_until(&mut lib, "sidecar read back", |l| l.colls[0].collection().is_some_and(|c| c.files().any(|(_, e)| e.tags.contains("dog"))));
     }
 
     #[test]

@@ -2,13 +2,15 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **M4**: M4.2 `notify` file watching, M4.3 missing files, M4.4 Tags screen, M4.5 Unknown tags
+1. **M4**: M4.3 missing files, M4.4 Tags screen, M4.5 Unknown tags
    review, M4.6 rebuild from sidecars, M4.7 saved searches, M4.8 slideshow and fullscreen.
 2. **UI polish**: fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
    for videos (via PlayCraft's Rust decoders, see Later).
 
 ## Known limitations
 
+- Network drives often send no change events; there, changes show up after a Rescan (outside
+  changes to `collection.json` are still noticed within 10 s).
 - Closing the window while a "changed by another program" choice is open keeps the version on
   disk; that window's unsaved changes are dropped.
 - Sidecars in `Stem` mode (`cat.xmp`): two files with the same stem in one folder (`cat.jpg`,
