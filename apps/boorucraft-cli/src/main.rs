@@ -54,7 +54,8 @@ Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
   type:png,gif  kind:video  animated:yes  missing:yes  dupes:yes  parent:3fa9  child:yes  pool:name  tagcount:0  md5:…  hash:3fa9
   date:2024-01..2024-06  date:>2023-05-01  imported:<7d  path:\"holiday 2023\"  source:none
   order:date  order:-filesize  order:name  order:random  (default: newest imported first)
-Environment: BOORUCRAFT_TAGS (tag list file), BOORUCRAFT_CONFIG_DIR, BOORUCRAFT_CACHE_DIR";
+Environment: BOORUCRAFT_TAGS (tag list file), BOORUCRAFT_CONFIG_DIR, BOORUCRAFT_CACHE_DIR
+ boorucraft-cli --version prints the version.";
 
 /// Set once a reader closes stdout or stderr (e.g. `boorucraft-cli info DIR | head`): from then
 /// on output to it is dropped. `println!` would panic instead, and the command must still finish
@@ -111,6 +112,10 @@ fn run(args: &[String]) -> Res {
         ["dupes", rest @ ..] if !rest.is_empty() => cmd_dupes(rest),
         ["tags", rest @ ..] => cmd_tags(rest),
         ["pools", rest @ ..] => cmd_pools(rest),
+        ["--version" | "-V" | "version"] => {
+            out!("boorucraft-cli {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         ["help" | "--help" | "-h"] => {
             out!("{USAGE}");
             Ok(())

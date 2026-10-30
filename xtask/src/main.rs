@@ -4,8 +4,14 @@
 //! - `layers`: each crate depends only on lower layers, and nothing below the UI layer pulls in a
 //!   windowing or GPU toolkit (so the UI stays swappable).
 //! - `rust-only`: no crate in Cargo.lock builds or links C/C++ code (AGENTS.md §2).
+//! - `version [set X.Y.Z[-pre]]`: print or set the workspace version (release packaging).
+//! - `ico` / `icns`: pack the app icon's PNGs for Windows and macOS (`packaging/icons.sh`).
 
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
+mod icns;
+mod ico;
+mod version;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -42,12 +48,17 @@ const C_ONLY_CRATES: &[&str] = &["cmake", "bindgen", "vcpkg", "system-deps", "cx
 const ALLOWED_LINKS: &[&str] = &["dl"];
 
 fn main() -> ExitCode {
-    let task = std::env::args().nth(1).unwrap_or_default();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let task = args.first().cloned().unwrap_or_default();
+    let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
     let result = match task.as_str() {
         "ci" => ci(),
         "layers" => layers(),
         "rust-only" => rust_only(),
-        _ => Err("usage: cargo xtask <ci|layers|rust-only>".to_string()),
+        "version" => version::run(&root(), &rest),
+        "ico" => ico::run(&rest),
+        "icns" => icns::run(&rest),
+        _ => Err("usage: cargo xtask <ci|layers|rust-only|version|ico|icns>".to_string()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

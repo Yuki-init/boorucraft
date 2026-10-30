@@ -8,7 +8,12 @@ Every asset file in this repository, with its author, source and licence.
 | `assets/fonts/Inter-OFL.txt` | The Inter Project Authors | same release, `LICENSE.txt` | OFL-1.1 | Inter's licence |
 | `assets/fonts/JetBrainsMono-Regular.ttf` | The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304 (`fonts/ttf/JetBrainsMono-Regular.ttf`), via PlayCraft | OFL-1.1 | Monospace text (embedded by `ui-egui`) |
 | `assets/fonts/JetBrainsMono-OFL.txt` | The JetBrains Mono Project Authors | same release, `OFL.txt` | OFL-1.1 | JetBrains Mono's licence |
+| `assets/app-icon/boorucraft.svg` | BooruCraft contributors (drawn for this project) | this repository | MIT OR Apache-2.0 | App icon; every other file in `assets/app-icon/` is rendered from it by `packaging/icons.sh` |
 
 egui's built-in fonts are switched off. For Japanese, Chinese and Korean text the app also uses
 a CJK font installed on the system (Noto Sans CJK and similar), loaded at run time and never
 bundled.
+
+Some build and packaging code (`xtask/src/ico.rs`, `xtask/src/version.rs`, `apps/boorucraft/build.rs`
+and the scripts in `packaging/`) is adapted from [FilmCraft](https://github.com/storytold/filmcraft)
+(MIT OR Apache-2.0); each file says so.

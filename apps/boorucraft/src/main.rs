@@ -7,6 +7,8 @@
 //!
 //! `--collection` opens folders for this session only (they aren't remembered).
 
+// Release builds on Windows are GUI programs: no console window opens with the app.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 use std::path::PathBuf;
@@ -15,7 +17,11 @@ use std::time::Duration;
 
 use boorucraft_ui_egui::{App, Options};
 
-const USAGE: &str = "usage: boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N] [--focus search|tags] [--duplicates|--tags] [--slideshow] [--fullscreen] [--screenshot OUT.png [--after SECONDS] [--during-scan]] [--size WxH]";
+/// Reverse-DNS app id: the Linux `.desktop` file, the hicolor icon name and the Wayland app id
+/// (`packaging/env.sh` has the same one).
+const APP_ID: &str = "io.github.yuki_init.boorucraft";
+
+const USAGE: &str = "usage: boorucraft [--version] [--collection DIR]... [--query Q] [--select N]... [--view N] [--focus search|tags] [--duplicates|--tags] [--slideshow] [--fullscreen] [--screenshot OUT.png [--after SECONDS] [--during-scan]] [--size WxH]";
 
 struct Args {
     options: Options,
@@ -61,10 +67,27 @@ fn parse_args() -> Result<Args, String> {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
+            "-V" | "--version" => {
+                println!("boorucraft {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             other => return Err(format!("unknown argument `{other}`\n{USAGE}")),
         }
     }
     Ok(Args { options, size })
+}
+
+/// The window, Dock, taskbar and app-switcher icon (`assets/app-icon/`, made by
+/// `packaging/icons.sh`). macOS gets the tile inside Apple's transparent margin so it matches the
+/// size of other Dock icons; Windows and Linux get the full-bleed tile.
+fn app_icon() -> Option<eframe::egui::IconData> {
+    #[cfg(target_os = "macos")]
+    let png: &[u8] = include_bytes!("../../../assets/app-icon/boorucraft-macos-512.png");
+    #[cfg(not(target_os = "macos"))]
+    let png: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.yuki_init.boorucraft.png");
+    let rgba = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(eframe::egui::IconData { rgba: rgba.into_raw(), width, height })
 }
 
 fn main() -> ExitCode {
@@ -79,9 +102,16 @@ fn main() -> ExitCode {
         renderer: eframe::Renderer::Wgpu,
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("BooruCraft")
-            .with_app_id("boorucraft")
+            .with_app_id(APP_ID)
             .with_inner_size(args.size)
             .with_min_inner_size([640.0, 400.0]),
+        ..Default::default()
+    };
+    let native = eframe::NativeOptions {
+        viewport: match app_icon() {
+            Some(icon) => native.viewport.with_icon(icon),
+            None => native.viewport,
+        },
         ..Default::default()
     };
     let options = args.options;

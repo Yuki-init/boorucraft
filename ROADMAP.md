@@ -142,3 +142,7 @@ aliases and implications, watches folders for outside changes, and shows video t
   (`storytold/craft-common-actions` `gate.yml`, as FilmCraft calls it), plus Dependabot;
   `cargo xtask ci` now ends with `cargo deny`, and `scripts/check.sh` runs that same gate in
   Podman for local work.
+- 2026-10-30 — R3.1: app icon (`assets/app-icon/boorucraft.svg`, rendered to hicolor PNGs,
+  `.ico` and `.icns` by `packaging/icons.sh`), window icon, app id
+  `io.github.yuki_init.boorucraft`, `--version` on both binaries, Windows GUI subsystem and exe
+  icon, and `cargo xtask version|ico|icns` for release packaging.

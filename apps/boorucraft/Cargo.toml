@@ -17,3 +17,8 @@ path = "src/main.rs"
 [dependencies]
 boorucraft-ui-egui = { workspace = true }
 eframe = { workspace = true }
+image = { workspace = true }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the icon and version info in boorucraft.exe (build.rs), as FilmCraft does.
+winresource = "0.1"
