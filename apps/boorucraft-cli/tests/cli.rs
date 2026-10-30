@@ -256,3 +256,30 @@ fn pools() {
     assert!(!e.read("collection.json").contains("manga"), "deleted pools leave the files");
     assert!(e.ok(&["pools"]).is_empty());
 }
+
+#[test]
+fn aliases_and_implications() {
+    let e = Env::new();
+    let (dir, a, b) = (e.dir(), e.file("a.png"), e.file("b.png"));
+    e.ok(&["scan", dir]);
+    e.ok(&["tags", "create", "cat", "animal", "kitty"]);
+    e.ok(&["tag", dir, &b, "cat"]);
+    // An existing tag becomes an alias: merged into its target.
+    assert!(e.ok(&["tags", "alias", "kitty", "cat"]).contains("merged"));
+    e.ok(&["tags", "alias", "neko", "cat"]);
+    assert_eq!(e.ok(&["tags", "aliases"]), "kitty -> cat\nneko -> cat\n");
+    assert!(e.fails(&["tags", "create", "neko"]).contains("alias of `cat`"));
+    e.ok(&["tags", "imply", "cat", "animal"]);
+    assert_eq!(e.ok(&["tags", "implications"]), "cat -> animal\n");
+    assert!(e.fails(&["tags", "imply", "animal", "neko"]).contains("loop"));
+    // b already had cat: it gets animal as the collection catches up.
+    assert_eq!(names(&e.ok(&["search", dir, "animal"])), vec!["b.png"]);
+    e.ok(&["tag", dir, &a, "neko"]);
+    assert_eq!(names(&e.ok(&["search", dir, "neko", "animal", "order:name"])), vec!["a.png", "b.png"]);
+    let json = e.read("collection.json");
+    assert!(!json.contains("\"neko\"") && !json.contains("\"kitty\""), "aliases are never stored on files: {json}");
+    e.ok(&["tags", "unimply", "cat", "animal"]);
+    e.ok(&["tags", "unalias", "neko", "kitty"]);
+    assert_eq!(e.ok(&["tags", "aliases"]), "");
+    assert_eq!(names(&e.ok(&["search", dir, "animal"])).len(), 2, "files keep implied tags");
+}

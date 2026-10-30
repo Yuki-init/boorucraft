@@ -124,3 +124,7 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 - 2026-10-30 — P3: video thumbnails (a frame near the start, with a play badge) and video sizes
   through PlayCraft's pure-Rust MP4/Matroska demuxer and H.264 decoder (`../playcraft`, a path
   dependency). Fixed MP4/MOV files being stored as HEIC pictures; scans correct old entries.
+- 2026-10-30 — L1: tag aliases (`neko` → `cat`: tagging, searching and sidecar keywords use the
+  tag) and implications (`cat` → `animal`, followed through chains, loops refused; new ones
+  reach files already tagged through the history), in tags.json version 2 and the CLI
+  (`tags alias|unalias|imply|unimply|aliases|implications`).

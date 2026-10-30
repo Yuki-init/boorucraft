@@ -87,9 +87,11 @@ location can be changed in settings, e.g. to a synced folder so several computer
     "cat":        { "description": "Domestic cats, any breed" },
     "sky":        {}
   },
+  "aliases": { "neko": "cat" },
+  "implications": { "cat": ["animal"] },
   "history": [
     { "revision": 41, "op": "rename", "from": "kitty", "to": "cat" },
-    { "revision": 42, "op": "merge", "from": ["feline"], "into": "cat" }
+    { "revision": 42, "op": "imply", "tag": "cat", "adds": ["animal"] }
   ]
 }
 ```
@@ -109,7 +111,19 @@ location can be changed in settings, e.g. to a synced folder so several computer
   first). Mapping and removing change the open collections only; a closed collection shows its
   own unknown tags when opened. Until then they are kept and searchable, but shown in grey.
 - Saved with the same safety rules as `collection.json`: debounced, atomic, `.bak`, lock.
-- Later: aliases (`kitty` → `cat`) and implications (`cat` → `animal`) live here too.
+- **Aliases** (`neko` → `cat`) are other names for a tag: typing one in the tag editor, the CLI
+  or a search means the tag, a sidecar keyword that is an alias is read as the tag, and aliases
+  are never stored on files. An alias can't share a name with a tag; making an existing tag an
+  alias merges it into the target first (as a booru does). Renames, merges and deletes carry
+  aliases along (a deleted tag's aliases go).
+- **Implications** (`cat` → `animal`) add tags: giving a file `cat` also gives it `animal` and
+  whatever `animal` implies in turn, and keywords another app adds to a sidecar bring their
+  implications too. A new implication is recorded in `history` (`imply`, with the whole chain it
+  adds), so files that already have the tag get the rest, in closed collections when they next
+  open. Removing an implication, or removing an implied tag from a file, leaves the other tags
+  alone. Loops are refused; a hand-edited loop is cut off rather than followed forever.
+- `version` is 1 until aliases or implications are used, then 2, so older builds refuse the file
+  rather than drop them.
 
 Counts per tag are not stored; they are computed in memory for the open collections.
 

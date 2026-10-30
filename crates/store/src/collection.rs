@@ -460,6 +460,11 @@ impl Collection {
                     HistoryOp::DeletePool { pool } => {
                         entry.pools.remove(pool);
                     }
+                    HistoryOp::Imply { tag, adds } => {
+                        if entry.tags.contains(tag) {
+                            entry.tags.extend(adds.iter().cloned());
+                        }
+                    }
                 }
             }
             // Only tag changes touch sidecars; pools live in collection.json alone.
@@ -472,11 +477,13 @@ impl Collection {
         changed
     }
 
-    /// Adds and removes tags on one file. Added tags must be in the tag list; removed ones
-    /// needn't be (so unknown tags can be cleaned up). Returns whether anything changed.
+    /// Adds and removes tags on one file. Added tags must be in the tag list (aliases stand for
+    /// their tag) and bring what they imply; removed ones needn't be in the list (so unknown tags
+    /// can be cleaned up). Returns whether anything changed.
     pub fn edit_tags(&mut self, hash: &str, add: &[&str], remove: &[&str], tags: &TagList) -> Result<bool> {
-        let add: Vec<String> = add.iter().map(|t| tags.resolve(t)).collect::<Result<_>>()?;
-        let remove: Vec<String> = remove.iter().map(|t| normalize_tag(t)).collect::<Result<_, _>>()?;
+        let mut add: BTreeSet<String> = add.iter().map(|t| tags.resolve(t)).collect::<Result<_>>()?;
+        tags.add_implied(&mut add);
+        let remove: Vec<String> = remove.iter().map(|t| normalize_tag(t).map(|t| tags.alias_target(&t).map_or(t, str::to_string))).collect::<Result<_, _>>()?;
         let entry = self.data.files.get_mut(hash).ok_or_else(|| StoreError::Invalid(format!("no file with hash {hash} in this collection")))?;
         let before = entry.tags.clone();
         for t in remove {
@@ -679,6 +686,40 @@ mod tests {
         assert!(!c.edit_tags("aa", &["cat"], &[], &tags).unwrap());
         assert!(matches!(c.edit_tags("aa", &["dog"], &[], &tags), Err(StoreError::UnknownTag(_))));
         assert_eq!(c.get("aa").unwrap().tags, ["cat".to_string()].into());
+    }
+
+    #[test]
+    fn tagging_follows_aliases_and_implications() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tags = TagList::in_memory();
+        for t in ["kitten", "cat", "animal", "sky"] {
+            tags.create(t, "").unwrap();
+        }
+        tags.add_alias("neko", "cat").unwrap();
+        tags.add_implication("kitten", "cat").unwrap();
+        tags.add_implication("cat", "animal").unwrap();
+        let mut c = Collection::open(dir.path()).unwrap();
+        c.insert("a".into(), entry("a.png", &[]));
+        c.insert("b".into(), entry("b.png", &["sky"]));
+        c.apply_tag_history(&tags);
+        c.edit_tags("a", &["kitten"], &[], &tags).unwrap();
+        assert_eq!(c.get("a").unwrap().tags, ["animal", "cat", "kitten"].map(String::from).into());
+        c.edit_tags("b", &["NEKO"], &[], &tags).unwrap();
+        assert_eq!(c.get("b").unwrap().tags, ["animal", "cat", "sky"].map(String::from).into(), "an alias adds its tag");
+        // Removing an implied tag is allowed; removing by alias works too.
+        c.edit_tags("a", &[], &["animal"], &tags).unwrap();
+        c.edit_tags("b", &[], &["neko"], &tags).unwrap();
+        assert_eq!(c.get("a").unwrap().tags, ["cat", "kitten"].map(String::from).into());
+        assert_eq!(c.get("b").unwrap().tags, ["animal", "sky"].map(String::from).into());
+
+        // A new implication reaches files that already have the tag.
+        tags.add_implication("sky", "kitten").unwrap();
+        let changed = c.apply_tag_history(&tags);
+        assert_eq!(changed, ["b".to_string()].into());
+        assert_eq!(c.get("b").unwrap().tags, ["animal", "cat", "kitten", "sky"].map(String::from).into());
+        // Removing it leaves the tags.
+        tags.remove_implication("sky", "kitten").unwrap();
+        assert!(c.apply_tag_history(&tags).is_empty());
     }
 
     #[test]

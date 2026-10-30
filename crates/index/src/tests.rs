@@ -356,3 +356,23 @@ fn videos_once_stored_as_heic_are_put_right() {
     assert_eq!((e.kind, e.format.as_str()), (Kind::Video, "mp4"));
     assert_eq!(scan(&mut c, &tags, &mut cache).hashed, 0, "and only once");
 }
+
+#[test]
+fn sidecar_tags_follow_aliases_and_implications() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "a.png", &png(10, 20));
+    let foreign = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:subject><rdf:Bag><rdf:li>kitty</rdf:li></rdf:Bag></dc:subject></rdf:Description>
+</rdf:RDF></x:xmpmeta>"#;
+    write(root, "a.png.xmp", foreign.as_bytes());
+    let mut tags = tag_list();
+    tags.create("animal", "").unwrap();
+    tags.add_alias("kitty", "cat").unwrap();
+    tags.add_implication("cat", "animal").unwrap();
+    let mut cache = ScanCache::in_memory();
+    let mut c = Collection::open(root).unwrap();
+    scan(&mut c, &tags, &mut cache);
+    let a = hash_at(&c, "a.png");
+    assert_eq!(c.get(&a).unwrap().tags, ["animal".to_string(), "cat".to_string()].into());
+}

@@ -1082,6 +1082,7 @@ impl Library {
             }
         };
         query.seed = self.seed;
+        self.tags.resolve_query_aliases(&mut query);
         self.pool_view = query.pool_order().map(str::to_string);
         self.refresh_dupes();
         self.links.parents = self.colls.iter().flat_map(|oc| oc.index.parents()).map(str::to_string).collect();

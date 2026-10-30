@@ -1,10 +1,15 @@
 //! The central tag list: the one set of valid tags and namespaces shared by every collection.
 //!
-//! Renames, merges and deletes bump `revision` and are recorded in `history`, so a collection
-//! that wasn't open at the time catches up when it next opens
+//! Renames, merges, deletes and new implications bump `revision` and are recorded in `history`,
+//! so a collection that wasn't open at the time catches up when it next opens
 //! ([`crate::Collection::apply_tag_history`]).
+//!
+//! **Aliases** are other names for a tag (`kitty` → `cat`): typing or searching the alias means
+//! the tag, and the alias itself is never stored on a file. **Implications** add tags: a file
+//! given `cat` also gets `animal` (and whatever `animal` implies). Removing an implication leaves
+//! the tags files already have.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use boorucraft_core::{is_valid_namespace, normalize_tag, split_namespace};
@@ -14,7 +19,11 @@ use crate::safefile::{self, DiskChange, Lock, Meta, Stamp};
 use crate::{Result, StoreError};
 
 pub const FORMAT: &str = "boorucraft-tags";
-pub const VERSION: u32 = 1;
+/// Version 2 added aliases and implications; files that use neither are still written as 1, so
+/// older BooruCraft builds keep reading them.
+pub const VERSION: u32 = 2;
+/// Deepest chain of implications followed (they can't form loops, but the file is hand-editable).
+const MAX_IMPLICATION_DEPTH: usize = 64;
 /// Biggest tags.json we read.
 pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -39,11 +48,29 @@ pub struct PoolInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum HistoryOp {
-    Rename { from: String, to: String },
-    Merge { from: Vec<String>, into: String },
-    Delete { tag: String },
-    RenamePool { from: String, to: String },
-    DeletePool { pool: String },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Merge {
+        from: Vec<String>,
+        into: String,
+    },
+    Delete {
+        tag: String,
+    },
+    RenamePool {
+        from: String,
+        to: String,
+    },
+    DeletePool {
+        pool: String,
+    },
+    /// Files with `tag` get every tag in `adds` (the implied tag and all it implies in turn).
+    Imply {
+        tag: String,
+        adds: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +93,12 @@ struct TagListFile {
     /// Pools: named, ordered groups of files (positions live in each collection).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pools: BTreeMap<String, PoolInfo>,
+    /// Alias → the tag it stands for.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    aliases: BTreeMap<String, String>,
+    /// Tag → the tags it implies directly.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    implications: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     history: Vec<HistoryEntry>,
 }
@@ -75,7 +108,8 @@ impl Default for TagListFile {
         let ns = |c: &str| NamespaceInfo { color: c.to_string() };
         TagListFile {
             format: FORMAT.into(),
-            version: VERSION,
+            // Raised to 2 on save once aliases or implications are used.
+            version: 1,
             revision: 0,
             namespaces: [("artist", ns("#d04040")), ("character", ns("#40a040")), ("series", ns("#a040c0")), ("meta", ns("#e09030"))]
                 .into_iter()
@@ -83,6 +117,8 @@ impl Default for TagListFile {
                 .collect(),
             tags: BTreeMap::new(),
             pools: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+            implications: BTreeMap::new(),
             history: Vec::new(),
         }
     }
@@ -189,10 +225,164 @@ impl TagList {
         split_namespace(tag, |n| self.is_namespace(n)).0
     }
 
-    /// Normalises `input` and checks that it is in the list.
+    /// Normalises `input`, follows an alias, and checks that the tag is in the list.
     pub fn resolve(&self, input: &str) -> Result<String> {
         let tag = normalize_tag(input)?;
+        let tag = self.alias_target(&tag).map_or(tag, str::to_string);
         if self.contains(&tag) { Ok(tag) } else { Err(StoreError::UnknownTag(tag)) }
+    }
+
+    /// The tag an alias stands for.
+    pub fn alias_target(&self, alias: &str) -> Option<&str> {
+        self.data.aliases.get(alias).map(String::as_str)
+    }
+
+    /// Replaces aliases in a search with the tags they stand for.
+    pub fn resolve_query_aliases(&self, query: &mut boorucraft_core::Query) {
+        for term in &mut query.terms {
+            if let boorucraft_core::TermKind::Tag(boorucraft_core::TagPattern::Exact(t)) = &mut term.kind
+                && let Some(target) = self.alias_target(t)
+            {
+                *t = target.to_string();
+            }
+        }
+    }
+
+    /// Every alias with its tag, by alias.
+    pub fn aliases(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.data.aliases.iter().map(|(a, t)| (a.as_str(), t.as_str()))
+    }
+
+    /// The aliases of one tag.
+    pub fn aliases_of<'a>(&'a self, tag: &'a str) -> impl Iterator<Item = &'a str> {
+        self.data.aliases.iter().filter(move |(_, t)| *t == tag).map(|(a, _)| a.as_str())
+    }
+
+    /// Makes `alias` another name for `tag`. If `alias` is a tag itself, it is merged into
+    /// `tag` first (files with it get `tag`), like a booru's alias.
+    pub fn add_alias(&mut self, alias: &str, tag: &str) -> Result<()> {
+        let alias = normalize_tag(alias)?;
+        let tag = self.resolve(tag)?;
+        if alias == tag {
+            return Err(StoreError::Invalid(format!("`{alias}` can't be an alias of itself")));
+        }
+        if let Some(old) = self.alias_target(&alias) {
+            return Err(StoreError::Invalid(format!("`{alias}` is already an alias of `{old}`")));
+        }
+        if self.contains(&alias) {
+            self.merge(&[alias.as_str()], &tag)?;
+        }
+        self.data.aliases.insert(alias, tag);
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn remove_alias(&mut self, alias: &str) -> Result<()> {
+        let alias = normalize_tag(alias)?;
+        self.data.aliases.remove(&alias).ok_or_else(|| StoreError::Invalid(format!("`{alias}` isn't an alias")))?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Every implication as (tag, implied tag), by tag.
+    pub fn implications(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.data.implications.iter().flat_map(|(t, set)| set.iter().map(move |i| (t.as_str(), i.as_str())))
+    }
+
+    /// The tags `tag` implies directly.
+    pub fn implies(&self, tag: &str) -> impl Iterator<Item = &str> {
+        self.data.implications.get(tag).into_iter().flatten().map(String::as_str)
+    }
+
+    /// The tags that imply `tag` directly.
+    pub fn implied_by<'a>(&'a self, tag: &'a str) -> impl Iterator<Item = &'a str> {
+        self.data.implications.iter().filter(move |(_, set)| set.contains(tag)).map(|(t, _)| t.as_str())
+    }
+
+    /// Everything `tag` implies, following chains (not `tag` itself).
+    pub fn implied_closure(&self, tag: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let mut frontier = vec![tag.to_string()];
+        for _ in 0..MAX_IMPLICATION_DEPTH {
+            let mut next = Vec::new();
+            for t in &frontier {
+                for i in self.implies(t) {
+                    if i != tag && out.insert(i.to_string()) {
+                        next.push(i.to_string());
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        out
+    }
+
+    /// Adds what the tags in `set` imply.
+    pub fn add_implied(&self, set: &mut BTreeSet<String>) {
+        let implied: Vec<String> = set.iter().flat_map(|t| self.implied_closure(t)).collect();
+        set.extend(implied);
+    }
+
+    /// Makes `tag` imply `implied`. Files that have `tag` get `implied` (and what it implies)
+    /// as collections catch up. Loops are refused.
+    pub fn add_implication(&mut self, tag: &str, implied: &str) -> Result<()> {
+        let tag = self.resolve(tag)?;
+        let implied = self.resolve(implied)?;
+        if tag == implied {
+            return Err(StoreError::Invalid(format!("`{tag}` can't imply itself")));
+        }
+        if self.implies(&tag).any(|i| i == implied) {
+            return Err(StoreError::Invalid(format!("`{tag}` already implies `{implied}`")));
+        }
+        if self.implied_closure(&implied).contains(&tag) {
+            return Err(StoreError::Invalid(format!("`{implied}` already implies `{tag}`; that would be a loop")));
+        }
+        self.data.implications.entry(tag.clone()).or_default().insert(implied.clone());
+        let mut adds = self.implied_closure(&implied);
+        adds.insert(implied);
+        self.record(HistoryOp::Imply { tag, adds: adds.into_iter().collect() });
+        Ok(())
+    }
+
+    /// Stops `tag` implying `implied`. Files keep the tags they have.
+    pub fn remove_implication(&mut self, tag: &str, implied: &str) -> Result<()> {
+        let tag = normalize_tag(tag)?;
+        let implied = normalize_tag(implied)?;
+        let set = self.data.implications.get_mut(&tag).filter(|s| s.contains(&implied));
+        let Some(set) = set else { return Err(StoreError::Invalid(format!("`{tag}` doesn't imply `{implied}`"))) };
+        set.remove(&implied);
+        if set.is_empty() {
+            self.data.implications.remove(&tag);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Points aliases and implications at `to` instead of each of `from` (`to: None` drops
+    /// them), after a rename, merge or delete.
+    fn retarget(&mut self, from: &[String], to: Option<&str>) {
+        let gone = |t: &String| from.contains(t);
+        self.data.aliases.retain(|_, t| !gone(t) || to.is_some());
+        for t in self.data.aliases.values_mut() {
+            if gone(t)
+                && let Some(to) = to
+            {
+                *t = to.to_string();
+            }
+        }
+        let old = std::mem::take(&mut self.data.implications);
+        for (tag, set) in old {
+            let Some(tag) = (if gone(&tag) { to.map(str::to_string) } else { Some(tag) }) else { continue };
+            for i in set {
+                let Some(i) = (if gone(&i) { to.map(str::to_string) } else { Some(i) }) else { continue };
+                if i != tag {
+                    self.data.implications.entry(tag.clone()).or_default().insert(i);
+                }
+            }
+        }
     }
 
     /// Existing tags that start with, then contain, `input`; for "did you mean" and autocomplete.
@@ -203,6 +393,15 @@ impl TagList {
         }
         let starts = self.data.tags.range(needle.clone()..).map(|(k, _)| k.as_str()).take_while(|k| k.starts_with(&needle));
         let mut out: Vec<&str> = starts.take(limit).collect();
+        // Aliases suggest the tag they stand for.
+        for (_, t) in self.data.aliases.range(needle.clone()..).take_while(|(a, _)| a.starts_with(&needle)) {
+            if out.len() >= limit {
+                break;
+            }
+            if self.contains(t) && !out.contains(&t.as_str()) {
+                out.push(t);
+            }
+        }
         if out.len() < limit {
             for k in self.data.tags.keys() {
                 if out.len() >= limit {
@@ -239,6 +438,9 @@ impl TagList {
         let tag = normalize_tag(input)?;
         if self.contains(&tag) {
             return Err(StoreError::TagExists(tag));
+        }
+        if let Some(t) = self.alias_target(&tag) {
+            return Err(StoreError::Invalid(format!("`{tag}` is an alias of `{t}`")));
         }
         self.data.tags.insert(tag.clone(), TagInfo { description: description.trim().to_string() });
         self.dirty = true;
@@ -293,8 +495,12 @@ impl TagList {
         if self.contains(&to) {
             return Err(StoreError::TagExists(to));
         }
+        if let Some(t) = self.alias_target(&to) {
+            return Err(StoreError::Invalid(format!("`{to}` is an alias of `{t}`")));
+        }
         let info = self.data.tags.remove(&from).ok_or_else(|| StoreError::UnknownTag(from.clone()))?;
         self.data.tags.insert(to.clone(), info);
+        self.retarget(std::slice::from_ref(&from), Some(&to));
         self.record(HistoryOp::Rename { from, to: to.clone() });
         Ok(to)
     }
@@ -324,6 +530,7 @@ impl TagList {
         for f in &froms {
             self.data.tags.remove(f);
         }
+        self.retarget(&froms, Some(&into));
         self.record(HistoryOp::Merge { from: froms, into });
         Ok(())
     }
@@ -334,6 +541,7 @@ impl TagList {
         if self.data.tags.remove(&tag).is_none() {
             return Err(StoreError::UnknownTag(tag));
         }
+        self.retarget(std::slice::from_ref(&tag), None);
         self.record(HistoryOp::Delete { tag });
         Ok(())
     }
@@ -424,6 +632,9 @@ impl TagList {
             return Err(StoreError::ReadOnly(self.path.clone()));
         }
         safefile::check_unchanged(&self.path, self.stamp, MAX_BYTES)?;
+        let uses_v2 =
+            !self.data.aliases.is_empty() || !self.data.implications.is_empty() || self.data.history.iter().any(|h| matches!(h.op, HistoryOp::Imply { .. }));
+        self.data.version = self.data.version.max(if uses_v2 { 2 } else { 1 });
         let mut bytes = serde_json::to_vec_pretty(&self.data).map_err(|source| StoreError::Json { path: self.path.clone(), source })?;
         bytes.push(b'\n');
         self.stamp = Some(safefile::write_atomic(&self.path, &bytes, true)?);
@@ -510,6 +721,128 @@ mod tests {
         assert!(t.suggest("zzzzzz", 5).is_empty());
         assert_eq!(t.namespace_of("artist:foo"), Some("artist"));
         assert_eq!(t.namespace_of("re:zero"), None);
+    }
+
+    #[test]
+    fn aliases_stand_for_their_tag() {
+        let mut t = TagList::in_memory();
+        for n in ["cat", "kitty", "dog", "animal"] {
+            t.create(n, "").unwrap();
+        }
+        t.add_alias("Neko", "cat").unwrap();
+        assert_eq!(t.resolve("neko").unwrap(), "cat");
+        assert_eq!(t.suggest("ne", 5), vec!["cat"], "an alias suggests its tag");
+        assert!(t.create("neko", "").is_err(), "an alias name isn't free for a tag");
+        assert!(t.rename("dog", "neko").is_err());
+        assert!(t.add_alias("neko", "dog").is_err(), "already an alias");
+        assert!(t.add_alias("cat", "cat").is_err());
+        assert!(t.add_alias("x", "nothing").is_err(), "the tag must exist");
+        // An alias to an alias means its tag.
+        t.add_alias("nyan", "neko").unwrap();
+        assert_eq!(t.alias_target("nyan"), Some("cat"));
+
+        // Aliasing an existing tag merges it, and its aliases follow.
+        t.add_alias("doggo", "dog").unwrap();
+        t.add_alias("dog", "animal").unwrap();
+        assert!(!t.contains("dog"));
+        assert_eq!(t.alias_target("doggo"), Some("animal"));
+        assert_eq!(t.history_since(0).last().map(|h| &h.op), Some(&HistoryOp::Merge { from: vec!["dog".into()], into: "animal".into() }));
+
+        // Renames, merges and deletes carry aliases along.
+        t.rename("cat", "feline").unwrap();
+        assert_eq!(t.aliases_of("feline").collect::<Vec<_>>(), vec!["neko", "nyan"]);
+        t.merge(&["feline"], "kitty").unwrap();
+        assert_eq!(t.alias_target("neko"), Some("kitty"));
+        t.delete("kitty").unwrap();
+        assert_eq!(t.alias_target("neko"), None, "aliases of a deleted tag go");
+        t.remove_alias("doggo").unwrap();
+        assert!(t.remove_alias("doggo").is_err());
+        assert_eq!(t.aliases().collect::<Vec<_>>(), vec![("dog", "animal")]);
+
+        let mut q = boorucraft_core::Query::parse("dog -dog ~dog do*").unwrap();
+        t.resolve_query_aliases(&mut q);
+        let names: Vec<_> = q
+            .terms
+            .iter()
+            .map(|term| match &term.kind {
+                boorucraft_core::TermKind::Tag(boorucraft_core::TagPattern::Exact(x) | boorucraft_core::TagPattern::Wildcard(x)) => x.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(names, vec!["animal", "animal", "animal", "do*"]);
+    }
+
+    #[test]
+    fn implications_follow_chains_and_refuse_loops() {
+        let mut t = TagList::in_memory();
+        for n in ["kitten", "cat", "animal", "living", "pet"] {
+            t.create(n, "").unwrap();
+        }
+        t.add_implication("cat", "animal").unwrap();
+        t.add_implication("animal", "living").unwrap();
+        t.add_implication("kitten", "cat").unwrap();
+        t.add_alias("neko", "cat").unwrap();
+        t.add_implication("neko", "pet").unwrap();
+        assert_eq!(t.implied_closure("kitten"), ["animal", "cat", "living", "pet"].map(String::from).into());
+        assert_eq!(t.implied_by("cat").collect::<Vec<_>>(), vec!["kitten"]);
+        assert!(t.add_implication("living", "kitten").is_err(), "a loop");
+        assert!(t.add_implication("cat", "cat").is_err());
+        assert!(t.add_implication("cat", "animal").is_err(), "already there");
+        assert!(t.add_implication("cat", "nothing").is_err());
+        // The history says what files with the tag get, chain included.
+        assert_eq!(
+            t.history_since(2).next().map(|h| &h.op),
+            Some(&HistoryOp::Imply { tag: "kitten".into(), adds: vec!["animal".into(), "cat".into(), "living".into()] })
+        );
+        let mut set: BTreeSet<String> = ["kitten".to_string()].into();
+        t.add_implied(&mut set);
+        assert_eq!(set.len(), 5);
+
+        // Renames, merges and deletes carry implications along.
+        t.rename("animal", "beast").unwrap();
+        assert_eq!(t.implies("cat").collect::<Vec<_>>(), vec!["beast", "pet"]);
+        t.merge(&["pet"], "beast").unwrap();
+        assert_eq!(t.implies("cat").collect::<Vec<_>>(), vec!["beast"]);
+        t.merge(&["kitten"], "cat").unwrap();
+        assert_eq!(t.implied_by("cat").count(), 0, "a tag never implies itself");
+        t.delete("living").unwrap();
+        assert_eq!(t.implications().collect::<Vec<_>>(), vec![("cat", "beast")]);
+        assert!(t.remove_implication("cat", "living").is_err());
+        t.remove_implication("cat", "beast").unwrap();
+        assert_eq!(t.implications().count(), 0);
+    }
+
+    #[test]
+    fn hand_edited_loops_dont_hang() {
+        let mut t = TagList::in_memory();
+        t.data.implications.insert("a".into(), ["b".to_string()].into());
+        t.data.implications.insert("b".into(), ["a".to_string(), "c".to_string()].into());
+        assert_eq!(t.implied_closure("a"), ["b", "c"].map(String::from).into());
+        t.data.implications.clear();
+        // A very long chain stops at the depth limit.
+        for i in 0..200 {
+            t.data.implications.insert(format!("t{i}"), [format!("t{}", i + 1)].into());
+        }
+        assert_eq!(t.implied_closure("t0").len(), MAX_IMPLICATION_DEPTH);
+    }
+
+    #[test]
+    fn version_2_only_when_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tags.json");
+        let mut t = TagList::open(&path).unwrap();
+        t.create("cat", "").unwrap();
+        t.create("animal", "").unwrap();
+        t.save().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"version\": 1"), "older builds can still read it");
+        t.add_implication("cat", "animal").unwrap();
+        t.add_alias("neko", "cat").unwrap();
+        t.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 2") && text.contains("\"neko\": \"cat\""), "{text}");
+        drop(t);
+        let t = TagList::open(&path).unwrap();
+        assert_eq!((t.resolve("neko").unwrap().as_str(), t.implies("cat").count()), ("cat", 1));
     }
 
     #[test]

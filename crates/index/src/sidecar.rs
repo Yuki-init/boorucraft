@@ -144,14 +144,18 @@ pub fn read_back(c: &mut Collection, tags: &TagList, cache: &mut ScanCache, fres
         for t in &sd.tags {
             match normalize_tag(t) {
                 Ok(t) => {
-                    found.insert(t);
+                    found.insert(tags.alias_target(&t).map_or(t, str::to_string));
                 }
                 Err(e) => report.errors.push((abs.clone(), format!("skipped keyword: {e}"))),
             }
         }
         let Some(entry) = c.get(&hash) else { continue };
         let ours = sd.hash.is_some();
-        let new_tags: BTreeSet<String> = if ours { found } else { entry.tags.union(&found).cloned().collect() };
+        let mut new_tags: BTreeSet<String> = if ours { found } else { entry.tags.union(&found).cloned().collect() };
+        // Tags another app added bring what they imply.
+        let mut added: BTreeSet<String> = new_tags.difference(&entry.tags).cloned().collect();
+        tags.add_implied(&mut added);
+        new_tags.extend(added);
         let new_rating = sd.rating.or(entry.rating);
         let new_source = sd.source.clone().or_else(|| entry.source.clone());
         if new_tags != entry.tags || new_rating != entry.rating || new_source != entry.source {

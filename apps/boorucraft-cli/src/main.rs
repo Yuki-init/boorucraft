@@ -41,6 +41,13 @@ const USAGE: &str = "usage:
   boorucraft-cli pools remove DIR NAME FILE...
   boorucraft-cli tags namespaces
   boorucraft-cli tags add-namespace NAME [COLOR]
+  boorucraft-cli tags aliases | implications list them
+  boorucraft-cli tags alias ALIAS TAG        ALIAS stands for TAG when tagging and searching
+                                             (an existing tag ALIAS is merged into TAG)
+  boorucraft-cli tags unalias ALIAS...
+  boorucraft-cli tags imply TAG IMPLIED...   files given TAG also get IMPLIED (files that have
+                                             TAG already get it as collections are next opened)
+  boorucraft-cli tags unimply TAG IMPLIED... (files keep the tags they have)
 
 Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
   rating:s,q  width:>1920  height:<=1080  ratio:16:9  mpixels:>2  filesize:<2MB
@@ -185,12 +192,13 @@ fn cmd_scan(dir: &Path) -> Res {
 }
 
 fn cmd_search(dir: &Path, query: &str) -> Res {
-    let q = Query::parse(query).map_err(|e| {
+    let mut q = Query::parse(query).map_err(|e| {
         let pad = " ".repeat(query.get(..e.span.start).map_or(0, |s| s.chars().count()));
         let marks = "^".repeat(query.get(e.span.clone()).map_or(1, |s| s.chars().count().max(1)));
         format!("{e}\n  {query}\n  {pad}{marks}")
     })?;
     let tags = open_tags(false)?;
+    tags.resolve_query_aliases(&mut q);
     let (c, _) = open_collection(dir, false, &tags)?;
     let index = SearchIndex::build(&c);
     let mut links = links_for(&c, &q);
@@ -557,7 +565,7 @@ fn cmd_pools(rest: &[&str]) -> Res {
 }
 
 /// `tags` subcommands that change the tag list.
-const TAG_EDITS: &[&str] = &["create", "describe", "rename", "merge", "delete", "add-namespace"];
+const TAG_EDITS: &[&str] = &["create", "describe", "rename", "merge", "delete", "add-namespace", "alias", "unalias", "imply", "unimply"];
 
 fn cmd_tags(rest: &[&str]) -> Res {
     match rest {
@@ -565,6 +573,20 @@ fn cmd_tags(rest: &[&str]) -> Res {
             let tags = open_tags(false)?;
             for (n, info) in tags.namespaces() {
                 out!("{n}  {}", info.color);
+            }
+            Ok(())
+        }
+        ["aliases"] => {
+            let tags = open_tags(false)?;
+            for (a, t) in tags.aliases() {
+                out!("{a} -> {t}");
+            }
+            Ok(())
+        }
+        ["implications"] => {
+            let tags = open_tags(false)?;
+            for (t, i) in tags.implications() {
+                out!("{t} -> {i}");
             }
             Ok(())
         }
@@ -605,6 +627,29 @@ fn cmd_tags(rest: &[&str]) -> Res {
                         tags.delete(n).map_err(err)?;
                     }
                     out!("deleted; collections update when next opened");
+                }
+                ("alias", [alias, tag]) => {
+                    let merging = tags.contains(&boorucraft_core::normalize_tag(alias).map_err(|e| e.to_string())?);
+                    tags.add_alias(alias, tag).map_err(err)?;
+                    if merging {
+                        out!("`{alias}` merged into `{tag}` and kept as an alias; collections update when next opened");
+                    }
+                }
+                ("unalias", names) if !names.is_empty() => {
+                    for n in names {
+                        tags.remove_alias(n).map_err(err)?;
+                    }
+                }
+                ("imply", [tag, implied @ ..]) if !implied.is_empty() => {
+                    for i in implied {
+                        tags.add_implication(tag, i).map_err(err)?;
+                    }
+                    out!("files with `{tag}` get the implied tags as collections are next opened");
+                }
+                ("unimply", [tag, implied @ ..]) if !implied.is_empty() => {
+                    for i in implied {
+                        tags.remove_implication(tag, i).map_err(err)?;
+                    }
                 }
                 ("add-namespace", [name]) => tags.add_namespace(name, "").map_err(err)?,
                 ("add-namespace", [name, color]) => tags.add_namespace(name, color).map_err(err)?,
