@@ -65,6 +65,12 @@ pub struct Config {
     /// Show each pool and each family of versions as one tile (default on).
     #[serde(default)]
     pub stacks: Option<bool>,
+    /// Seconds each picture is shown in a slideshow (default 5).
+    #[serde(default)]
+    pub slideshow_secs: Option<u64>,
+    /// Start again from the first result after the last (default on).
+    #[serde(default)]
+    pub slideshow_loop: Option<bool>,
     /// Searches kept in the sidebar, in the user's order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub saved_searches: Vec<SavedSearch>,
@@ -1113,6 +1119,15 @@ impl Library {
         let Some(to) = idx.checked_add_signed(by).filter(|t| *t < len) else { return };
         self.config.saved_searches.swap(idx, to);
         self.save_config();
+    }
+
+    /// Remembers the slideshow interval and looping for next time.
+    pub fn set_slideshow(&mut self, secs: u64, looping: bool) {
+        self.config.slideshow_secs = Some(secs);
+        self.config.slideshow_loop = Some(looping);
+        if !self.session_only {
+            self.save_config();
+        }
     }
 
     pub fn stacking(&self) -> bool {

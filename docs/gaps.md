@@ -2,9 +2,10 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **M4**: M4.8 slideshow and fullscreen.
-2. **UI polish**: fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
-   for videos (via PlayCraft's Rust decoders, see Later).
+1. **UI polish**: a progress count during scans (now only a spinner); preloading the next picture
+   in the viewer and slideshow; thumbnails for videos (via PlayCraft's Rust decoders, see Later).
+2. **Later** (ROADMAP): tag aliases and implications; importing tags from boorus by MD5; a local
+   auto-tagger.
 
 ## Known limitations
 

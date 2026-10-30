@@ -438,7 +438,16 @@ the visible tiles.
   sidecars).
 
 Keyboard first: `/` focuses search, arrows move through the grid, `Enter` opens, `t` edits tags,
-`1`/`2`/`3` set the rating, `o` opens in the default app.
+`1`/`2`/`3` set the rating, `o` opens in the default app, `s` starts or stops a slideshow, `F11`
+toggles fullscreen.
+
+**Slideshow** (`s`, or the viewer bar; `--slideshow`): steps through the current results from the
+open picture (or the first selected). Each picture's time starts once it has loaded, and an
+animation plays through at least once. Space pauses, arrows step (the next picture gets its full
+time), Esc stops. Interval (2–60 s, default 5) and looping (default on) are kept in
+`config.json`. **Fullscreen** (`F11`, `--fullscreen`): with a picture open, only the picture is
+drawn; a hint with the position and keys shows for 2.5 s after any mouse move or key. Esc leaves
+fullscreen and stops the slideshow.
 
 ## Open questions
 

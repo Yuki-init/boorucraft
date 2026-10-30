@@ -9,6 +9,7 @@ mod dupes_view;
 pub mod fonts;
 pub mod library;
 pub mod selection;
+mod slideshow;
 pub mod suggest;
 mod tags_view;
 pub mod thumbnails;
@@ -62,6 +63,10 @@ pub struct Options {
     pub focus: Option<String>,
     /// Start on this screen instead of the grid.
     pub screen: Option<Screen>,
+    /// Start a slideshow once the scans are done (from `--view`, or the first result).
+    pub slideshow: bool,
+    /// Start in fullscreen.
+    pub fullscreen: bool,
 }
 
 pub struct App {
@@ -98,6 +103,10 @@ pub struct App {
     naming_search: Option<String>,
     /// A saved search being renamed: (its place, the new name so far).
     renaming_search: Option<(usize, String)>,
+    /// Running while the viewer steps through the results by itself.
+    slideshow: Option<slideshow::Slideshow>,
+    /// Show the controls hint over a fullscreen picture until then (after mouse or keys).
+    hint_until: Option<Instant>,
     /// Searches to go back to after opening a stack (Backspace).
     back: Vec<String>,
 }
@@ -145,6 +154,8 @@ impl App {
             tags_view: tags_view::TagsView::default(),
             naming_search: None,
             renaming_search: None,
+            slideshow: None,
+            hint_until: None,
             back: Vec::new(),
         }
     }
@@ -174,6 +185,114 @@ impl App {
         let max_side = ctx.input(|i| i.max_texture_side) as u32;
         self.sel.only(pos);
         self.viewer = Some(Viewer::open(pos, hit, path, &format, max_side.max(1024), ctx));
+    }
+
+    /// Starts a slideshow (from the picture in the viewer, else the first selected result, else
+    /// the first one), or stops the one running.
+    fn toggle_slideshow(&mut self, ctx: &egui::Context) {
+        if self.slideshow.take().is_some() {
+            return;
+        }
+        if self.lib.hits.is_empty() {
+            return;
+        }
+        if self.viewer.is_none() {
+            let start = self.sel.items.iter().min().copied().unwrap_or(0);
+            self.open_result(start, ctx);
+        }
+        let secs = self.lib.config.slideshow_secs.unwrap_or(slideshow::DEFAULT_SECS);
+        self.slideshow = Some(slideshow::Slideshow::new(Duration::from_secs(secs), self.lib.config.slideshow_loop.unwrap_or(true)));
+    }
+
+    fn set_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+        self.hint_until = on.then(|| Instant::now() + HINT_TIME);
+    }
+
+    /// Moves the slideshow on when the current picture has had its time.
+    fn run_slideshow(&mut self, ctx: &egui::Context) {
+        if self.viewer.is_none() {
+            self.slideshow = None;
+        }
+        let (Some(show), Some(v)) = (&mut self.slideshow, &self.viewer) else { return };
+        let now = Instant::now();
+        let animation = v.animation_length();
+        match show.tick(now, v.pos, self.lib.hits.len(), v.is_ready(), animation) {
+            slideshow::Step::Go(p) => self.open_result(p, ctx),
+            slideshow::Step::End => {
+                self.slideshow = None;
+                self.lib.notify("Slideshow finished");
+            }
+            slideshow::Step::Stay => {
+                if let Some(wait) = show.wait(now, animation) {
+                    ctx.request_repaint_after(wait);
+                } else if !v.is_ready() {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+
+    /// Slideshow and fullscreen controls in the viewer bar.
+    fn slideshow_controls(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        match &mut self.slideshow {
+            None => {
+                if ui.button("Slideshow").on_hover_text("S · Space pauses · Esc stops").clicked() {
+                    self.toggle_slideshow(&ctx);
+                }
+            }
+            Some(show) => {
+                let label = if show.is_paused() { "Resume" } else { "Pause" };
+                if ui.button(label).on_hover_text("Space").clicked() {
+                    show.toggle_pause(Instant::now());
+                }
+                let mut secs = show.interval.as_secs();
+                let mut looping = show.looping;
+                egui::ComboBox::from_id_salt("slideshow-secs").width(60.0).selected_text(format!("{secs} s")).show_ui(ui, |ui| {
+                    for s in slideshow::INTERVALS {
+                        ui.selectable_value(&mut secs, s, format!("{s} s"));
+                    }
+                });
+                ui.checkbox(&mut looping, "Loop");
+                if secs != show.interval.as_secs() || looping != show.looping {
+                    show.interval = Duration::from_secs(secs);
+                    show.looping = looping;
+                    self.lib.set_slideshow(secs, looping);
+                }
+                if ui.button("Stop").on_hover_text("S or Esc").clicked() {
+                    self.slideshow = None;
+                }
+            }
+        }
+        let full = is_fullscreen(&ctx);
+        if ui.button(if full { "Leave fullscreen" } else { "Fullscreen" }).on_hover_text("F11 · Esc leaves").clicked() {
+            self.set_fullscreen(&ctx, !full);
+        }
+    }
+
+    /// Over a fullscreen picture: where we are and the keys, for a moment after any input.
+    fn fullscreen_hint(&mut self, ui: &egui::Ui, view: Rect) {
+        let moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO || !i.keys_down.is_empty());
+        if moved {
+            self.hint_until = Some(Instant::now() + HINT_TIME);
+        }
+        let Some(until) = self.hint_until.filter(|t| *t > Instant::now()) else { return };
+        ui.ctx().request_repaint_after(until.saturating_duration_since(Instant::now()));
+        let Some(v) = &self.viewer else { return };
+        let mut text = format!("{} / {}", v.pos + 1, self.lib.hits.len());
+        match &self.slideshow {
+            Some(s) if s.is_paused() => text.push_str("   ·   Slideshow paused (Space)"),
+            Some(s) => text.push_str(&format!("   ·   Slideshow, {} s (Space pauses)", s.interval.as_secs())),
+            None => text.push_str("   ·   S: slideshow"),
+        }
+        text.push_str("   ·   ← →   ·   Esc: leave fullscreen");
+        let painter = ui.painter_at(view);
+        let pos = view.center_bottom() - egui::vec2(0.0, 28.0);
+        let galley = painter.layout_no_wrap(text, FontId::proportional(15.0), Color32::from_gray(230));
+        let rect = Rect::from_center_size(pos, galley.size() + egui::vec2(24.0, 12.0));
+        painter.rect_filled(rect, 6.0, Color32::from_black_alpha(170));
+        painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
     }
 
     fn open_external(&mut self, pos: usize) {
@@ -236,6 +355,8 @@ impl App {
                 Key::Num2 => self.rate(Some(Rating::Questionable)),
                 Key::Num3 => self.rate(Some(Rating::Explicit)),
                 Key::Num0 => self.rate(None),
+                Key::S => self.toggle_slideshow(ctx),
+                Key::F11 => self.set_fullscreen(ctx, !is_fullscreen(ctx)),
                 Key::OpenBracket => self.move_in_pool(if m.shift { PoolMove::First } else { PoolMove::Earlier }),
                 Key::CloseBracket => self.move_in_pool(if m.shift { PoolMove::Last } else { PoolMove::Later }),
                 _ => {}
@@ -243,7 +364,16 @@ impl App {
             if let Some(v) = &mut self.viewer {
                 let pos = v.pos;
                 match key {
+                    Key::Escape if self.slideshow.is_some() || is_fullscreen(ctx) => {
+                        self.slideshow = None;
+                        self.set_fullscreen(ctx, false);
+                    }
                     Key::Escape | Key::Backspace => self.viewer = None,
+                    Key::Space if self.slideshow.is_some() => {
+                        if let Some(show) = &mut self.slideshow {
+                            show.toggle_pause(Instant::now());
+                        }
+                    }
                     Key::ArrowRight | Key::Space if pos + 1 < n => self.open_result(pos + 1, ctx),
                     Key::ArrowLeft if pos > 0 => self.open_result(pos - 1, ctx),
                     Key::F => v.fit(),
@@ -1242,12 +1372,9 @@ impl App {
     }
 
     fn viewer_bar(&mut self, ui: &mut egui::Ui) {
-        let Some(v) = &mut self.viewer else { return };
+        let Some(pos) = self.viewer.as_ref().map(|v| v.pos) else { return };
         let total = self.lib.hits.len();
-        let pos = v.pos;
-        let mut close = false;
-        let mut go = None;
-        let mut external = false;
+        let (mut close, mut go, mut external, mut fit, mut actual) = (false, None, false, false, false);
         ui.horizontal(|ui| {
             if ui.button("← Back").on_hover_text("Esc").clicked() {
                 close = true;
@@ -1260,18 +1387,23 @@ impl App {
                 go = Some(pos + 1);
             }
             ui.separator();
-            if ui.button("Fit").on_hover_text("F").clicked() {
+            fit = ui.button("Fit").on_hover_text("F").clicked();
+            actual = ui.button("1:1").on_hover_text("Z").clicked();
+            external = ui.button("Open in default app").on_hover_text("O").clicked();
+            ui.separator();
+            self.slideshow_controls(ui);
+        });
+        if let Some(v) = &mut self.viewer {
+            if fit {
                 v.fit();
             }
-            if ui.button("1:1").on_hover_text("Z").clicked() {
+            if actual {
                 v.actual_size();
             }
-            if ui.button("Open in default app").on_hover_text("O").clicked() {
-                external = true;
-            }
-        });
+        }
         if close {
             self.viewer = None;
+            self.slideshow = None;
             self.scroll_to = Some(pos);
         }
         if let Some(p) = go {
@@ -1281,6 +1413,25 @@ impl App {
         if external {
             self.open_external(pos);
         }
+    }
+
+    /// Dialogs, start-up options, and waking up for saves, scans and watched folders.
+    fn finish_frame(&mut self, ctx: &egui::Context) {
+        self.confirm_trash_dialog(ctx);
+        self.confirm_forget_dialog(ctx);
+        self.startup(ctx);
+        if let Some(wait) = self.lib.save_due() {
+            ctx.request_repaint_after(wait);
+        }
+        if self.lib.is_busy() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if let Some(wait) = self.lib.rescan_due() {
+            ctx.request_repaint_after(wait);
+        }
+        // Watched folders wake the window themselves; checking now and then also catches
+        // changes the watcher can't see (network drives) or when watching isn't available.
+        ctx.request_repaint_after(if self.lib.is_watching() { Duration::from_secs(10) } else { library::DISK_CHECK_EVERY });
     }
 
     /// Applies `--select` / `--view` and takes `--screenshot` once scanning is done.
@@ -1296,6 +1447,12 @@ impl App {
             }
             if let Some(v) = self.options.view {
                 self.open_result(v, ctx);
+            }
+            if self.options.slideshow {
+                self.toggle_slideshow(ctx);
+            }
+            if self.options.fullscreen {
+                self.set_fullscreen(ctx, true);
             }
             self.focus = match self.options.focus.as_deref() {
                 Some("search") => Some(SEARCH_ID),
@@ -1344,6 +1501,23 @@ impl eframe::App for App {
         self.lib.refresh_dupes();
         self.thumbs.begin_frame(&ctx);
         self.handle_keys(&ctx);
+        self.run_slideshow(&ctx);
+
+        // A fullscreen picture gets the whole screen: no bars or panels.
+        if self.viewer.is_some() && is_fullscreen(&ctx) {
+            egui::CentralPanel::no_frame().show(ui, |ui| {
+                let view = ui.max_rect();
+                let format = self.viewer.as_ref().and_then(|v| self.lib.entry(&v.hit)).map(|e| e.format.clone()).unwrap_or_default();
+                let back = self.viewer.as_mut().is_some_and(|v| v.show(ui, view, &format));
+                self.fullscreen_hint(ui, view);
+                if back {
+                    self.slideshow = None;
+                    self.set_fullscreen(&ctx, false);
+                }
+            });
+            self.finish_frame(&ctx);
+            return;
+        }
 
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(4.0);
@@ -1383,21 +1557,7 @@ impl eframe::App for App {
             }
         });
 
-        self.confirm_trash_dialog(&ctx);
-        self.confirm_forget_dialog(&ctx);
-        self.startup(&ctx);
-        if let Some(wait) = self.lib.save_due() {
-            ctx.request_repaint_after(wait);
-        }
-        if self.lib.is_busy() {
-            ctx.request_repaint_after(Duration::from_millis(250));
-        }
-        if let Some(wait) = self.lib.rescan_due() {
-            ctx.request_repaint_after(wait);
-        }
-        // Watched folders wake the window themselves; checking now and then also catches
-        // changes the watcher can't see (network drives) or when watching isn't available.
-        ctx.request_repaint_after(if self.lib.is_watching() { Duration::from_secs(10) } else { library::DISK_CHECK_EVERY });
+        self.finish_frame(&ctx);
     }
 
     fn on_exit(&mut self) {
@@ -1690,6 +1850,13 @@ fn parse_color(s: &str) -> Option<Color32> {
     }
     let v = u32::from_str_radix(hex, 16).ok()?;
     Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// How long the fullscreen hint stays after the last mouse move or key.
+const HINT_TIME: Duration = Duration::from_millis(2500);
+
+fn is_fullscreen(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
 }
 
 /// What the right-click menu of a saved search asked for.

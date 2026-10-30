@@ -11,7 +11,7 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 | M1 | Desktop app: add and open collection folders, thumbnail cache and worker pool, virtualised grid, viewer (zoom, pan, next/prev, animation), open unsupported formats in the default app, tag editor with the central tag list and "Create tag", bulk tagging, ratings | done |
 | M2 | Full search syntax (negation, OR, wildcards, every metatag, `order:`), error underline, autocomplete, tag sidebar with counts, namespaces and colours | done |
 | M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates); grouping: parent/child links and pools, stacked in the grid | done |
-| M4 | File watching, reload on outside changes, missing-file handling, Tags screen (rename/merge/delete across all collections, catch-up for closed ones), Unknown tags review, reading back sidecars edited by other apps, rebuild from sidecars, saved searches, slideshow | |
+| M4 | File watching, reload on outside changes, missing-file handling, Tags screen (rename/merge/delete across all collections, catch-up for closed ones), Unknown tags review, reading back sidecars edited by other apps, rebuild from sidecars, saved searches, slideshow | done |
 | Later | Tag aliases and implications; import tags from boorus by MD5; local ML auto-tagger; video thumbnails via PlayCraft's Rust decoders | |
 
 ## Progress log
@@ -113,3 +113,6 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   recover`); a copy of the damaged file is kept in the config folder first.
 - 2026-10-30 — M4.7: saved searches in the sidebar (`config.json`): save the current search
   under a name, run, rename, replace, reorder, delete. Searches with errors can't be saved.
+- 2026-10-30 — M4.8: slideshow (`s`, viewer bar, `--slideshow`: interval, loop, pause; timing
+  starts once a picture has loaded and lets animations finish) and fullscreen (`F11`,
+  `--fullscreen`: picture only, with a fading hint). M4 done.

@@ -67,6 +67,19 @@ impl Viewer {
         Viewer { pos, hit, content, frame: 0, frame_shown: Instant::now(), zoom: None, pan: Vec2::ZERO }
     }
 
+    /// Loaded, or known not to load (a slideshow can time it).
+    pub fn is_ready(&self) -> bool {
+        !matches!(self.content, Content::Loading(_))
+    }
+
+    /// One run through an animation (zero for a still picture).
+    pub fn animation_length(&self) -> Duration {
+        match &self.content {
+            Content::Ready { frames, .. } if frames.len() > 1 => frames.iter().map(|f| f.delay).sum(),
+            _ => Duration::ZERO,
+        }
+    }
+
     pub fn is_external(&self) -> bool {
         matches!(self.content, Content::External)
     }
