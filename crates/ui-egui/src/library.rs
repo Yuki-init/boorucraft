@@ -868,6 +868,44 @@ impl Library {
         Some(out)
     }
 
+    /// Tags used in the open collections that aren't in the tag list (copied from another
+    /// computer, or added by another app in a sidecar), with file counts, most used first.
+    /// Call [`Self::refresh_usage`] first in a frame.
+    pub fn unknown_tags(&self) -> Vec<(String, u64)> {
+        self.usage().iter().filter(|(t, _)| !self.tags.contains(t)).cloned().collect()
+    }
+
+    /// Settles an unknown tag in the open collections: files that have it get `with` (a tag
+    /// from the list) instead, or just lose it when `with` is `None`. Returns how many files
+    /// changed. (To keep it, add it to the list with [`Self::create_tag`].)
+    pub fn replace_unknown_tag(&mut self, tag: &str, with: Option<&str>) -> usize {
+        let with = match with.map(|w| self.tags.resolve(w)) {
+            Some(Ok(w)) => Some(w),
+            Some(Err(e)) => {
+                self.notify(e.to_string());
+                return 0;
+            }
+            None => None,
+        };
+        let hits: Vec<Hit> = self
+            .colls
+            .iter()
+            .enumerate()
+            .filter_map(|(i, oc)| oc.collection().map(|c| (i, c)))
+            .flat_map(|(i, c)| c.files().filter(|(_, e)| e.tags.contains(tag)).map(move |(h, _)| Hit { coll: i, hash: h.to_string() }))
+            .collect();
+        let mut n = 0;
+        self.edit_entries(&hits, |e| {
+            let changed = e.tags.remove(tag);
+            if let Some(w) = &with {
+                e.tags.insert(w.clone());
+            }
+            n += usize::from(changed);
+            changed
+        });
+        n
+    }
+
     /// Renames a tag everywhere. Returns the new name.
     pub fn rename_tag(&mut self, from: &str, to: &str) -> Option<String> {
         self.change_tags(|t| t.rename(from, to))
@@ -2062,6 +2100,39 @@ mod tests {
         assert!(lib.delete_pool("holiday").is_some());
         lib.search("pool:any");
         assert!(lib.hits.is_empty());
+    }
+
+    #[test]
+    fn unknown_tags_are_added_mapped_or_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        picture(&pics.join("a.png"), 10);
+        picture(&pics.join("b.png"), 120);
+        // Sidecars from another app, with keywords the tag list doesn't have.
+        let xmp = |kw: &str| {
+            format!(
+                r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:subject><rdf:Bag>{kw}</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta>"#
+            )
+        };
+        std::fs::write(pics.join("a.png.xmp"), xmp("<rdf:li>Kitty</rdf:li><rdf:li>Beach</rdf:li><rdf:li>junk</rdf:li>")).unwrap();
+        std::fs::write(pics.join("b.png.xmp"), xmp("<rdf:li>Kitty</rdf:li>")).unwrap();
+        let mut lib = library(tmp.path(), &pics);
+        lib.create_tag("cat");
+        lib.refresh_usage();
+        assert_eq!(lib.unknown_tags(), vec![("kitty".to_string(), 2), ("beach".to_string(), 1), ("junk".to_string(), 1)]);
+
+        assert_eq!(lib.replace_unknown_tag("kitty", Some("cat")), 2);
+        assert_eq!(lib.replace_unknown_tag("junk", None), 1);
+        assert_eq!(lib.replace_unknown_tag("beach", Some("not_a_tag")), 0, "only listed tags can replace one");
+        lib.create_tag("beach");
+        lib.refresh_usage();
+        assert!(lib.unknown_tags().is_empty());
+        lib.search("cat");
+        assert_eq!(lib.hits.len(), 2);
+        lib.flush_all();
+        let a = std::fs::read_to_string(pics.join("a.png.xmp")).unwrap();
+        assert!(a.contains(">cat<") && !a.contains("junk") && a.contains("beach"), "{a}");
     }
 
     #[test]

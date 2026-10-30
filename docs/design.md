@@ -104,8 +104,10 @@ location can be changed in settings, e.g. to a synced folder so several computer
   open at the time (e.g. on an unplugged drive) catches up from `history` the next time it opens.
 - **Unknown tags**: tags in a collection that aren't in the central list, e.g. from a folder
   copied from another computer or tags added by another app in a sidecar. They are listed on an
-  "Unknown tags" screen with three choices for each: add to the central list, map to an existing
-  tag, or remove. Until then they are kept and searchable, but shown in grey.
+  "Unknown" tab of the Tags screen with three choices for each: add to the central list (or
+  "Add all"), use an existing tag instead (with suggestions), or remove from the files (asks
+  first). Mapping and removing change the open collections only; a closed collection shows its
+  own unknown tags when opened. Until then they are kept and searchable, but shown in grey.
 - Saved with the same safety rules as `collection.json`: debounced, atomic, `.bak`, lock.
 - Later: aliases (`kitty` → `cat`) and implications (`cat` → `animal`) live here too.
 

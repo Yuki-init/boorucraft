@@ -103,3 +103,6 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   rename, merge, delete (with confirmations); namespaces (colour, add, remove) and pools
   (rename, delete). Fixed: pool renames and deletes from the tag list didn't reindex or save
   open collections (only tag changes did); scans that were running catch up when they finish.
+- 2026-10-30 — M4.5: Unknown tags review: "Unknown (n)" tab on the Tags screen listing tags in
+  the open collections that aren't in the tag list, from the usage counts already kept; add
+  (one or all), use a listed tag instead (with suggestions), or remove from the files.

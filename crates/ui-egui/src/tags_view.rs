@@ -1,6 +1,7 @@
 //! The Tags screen: the central tag list with how many files use each tag, and changes that reach
 //! every collection (open ones now, closed ones when next opened): create, describe, rename,
-//! merge, delete; namespace colours; pool names.
+//! merge, delete; namespace colours; pool names; and the review of unknown tags (used in files
+//! but not in the list).
 
 use super::*;
 
@@ -12,6 +13,7 @@ pub(crate) enum TagsTab {
     Tags,
     Namespaces,
     Pools,
+    Unknown,
 }
 
 /// A change that needs a "are you sure?" first.
@@ -19,6 +21,7 @@ enum Confirm {
     Merge { from: String, into: String },
     Delete(String),
     DeletePool(String),
+    RemoveUnknown(String),
 }
 
 #[derive(Default)]
@@ -37,6 +40,8 @@ pub(crate) struct TagsView {
     ns_color_edit: Option<(String, [u8; 3])>,
     pool: Option<String>,
     pool_rename: String,
+    unknown: Option<String>,
+    map_to: String,
     confirm: Option<Confirm>,
 }
 
@@ -63,7 +68,11 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading("Tags");
             ui.separator();
-            for (tab, name) in [(TagsTab::Tags, "Tags"), (TagsTab::Namespaces, "Namespaces"), (TagsTab::Pools, "Pools")] {
+            let unknown = self.lib.unknown_tags().len();
+            let unknown_label = if unknown > 0 { format!("Unknown ({unknown})") } else { "Unknown".to_string() };
+            for (tab, name) in
+                [(TagsTab::Tags, "Tags"), (TagsTab::Namespaces, "Namespaces"), (TagsTab::Pools, "Pools"), (TagsTab::Unknown, unknown_label.as_str())]
+            {
                 if ui.selectable_label(self.tags_view.tab == tab, name).clicked() {
                     self.tags_view.tab = tab;
                 }
@@ -78,6 +87,7 @@ impl App {
             TagsTab::Tags => self.tags_tab(ui),
             TagsTab::Namespaces => self.namespaces_tab(ui),
             TagsTab::Pools => self.pools_tab(ui),
+            TagsTab::Unknown => self.unknown_tab(ui),
         }
         self.tags_confirm_dialog(ui.ctx());
     }
@@ -334,6 +344,104 @@ impl App {
         }
     }
 
+    /// Tags found in files that aren't in the list: add each, map it to a listed tag, or remove it.
+    fn unknown_tab(&mut self, ui: &mut egui::Ui) {
+        let unknown = self.lib.unknown_tags();
+        ui.label(
+            grey("Tags found in files but not in the tag list: from a folder copied from another computer, or added by another app in a sidecar. Until you decide, they are kept and searchable, shown in grey.")
+                .small(),
+        );
+        if unknown.is_empty() {
+            ui.add_space(8.0);
+            ui.label(grey("Every tag in the open collections is in the tag list."));
+            return;
+        }
+        let writable = !self.lib.tags.is_read_only();
+        if ui
+            .add_enabled(writable, egui::Button::new(format!("Add all {} to the tag list", unknown.len())))
+            .on_hover_text("Keep them all as they are")
+            .clicked()
+        {
+            for (t, _) in &unknown {
+                self.lib.create_tag(t);
+            }
+            self.lib.notify(format!("Added {} tags to the tag list", unknown.len()));
+            return;
+        }
+        ui.add_space(4.0);
+        let mut pick = None;
+        ui.columns(2, |cols| {
+            let [left, right] = cols else { return };
+            egui::ScrollArea::vertical().id_salt("unknown-rows").auto_shrink([false, false]).show_rows(left, ROW, unknown.len(), |ui, range| {
+                for (tag, n) in unknown.get(range).unwrap_or_default() {
+                    ui.horizontal(|ui| {
+                        ui.set_height(ROW);
+                        let on = self.tags_view.unknown.as_deref() == Some(tag.as_str());
+                        if ui.selectable_label(on, RichText::new(tag).color(Color32::from_gray(150))).clicked() {
+                            pick = Some(tag.clone());
+                        }
+                        ui.label(RichText::new(n.to_string()).small().color(Color32::from_gray(120)));
+                    });
+                }
+            });
+            let Some((tag, n)) = self.tags_view.unknown.as_ref().and_then(|t| unknown.iter().find(|(u, _)| u == t)).cloned() else {
+                right.label(grey("Pick a tag on the left."));
+                return;
+            };
+            right.label(RichText::new(&tag).size(18.0).strong().color(Color32::from_gray(190)));
+            right.horizontal(|ui| {
+                ui.label(grey(format!("On {n} file{} in the open collections", if n == 1 { "" } else { "s" })));
+                if ui.small_button("Show them").clicked() {
+                    self.query = tag.clone();
+                    self.screen = Screen::Grid;
+                }
+            });
+            right.add_space(8.0);
+            if right.add_enabled(writable, egui::Button::new("Add to the tag list")).on_hover_text("Keep it as it is").clicked()
+                && self.lib.create_tag(&tag).is_some()
+            {
+                self.lib.notify(format!("Added {tag} to the tag list"));
+            }
+            right.add_space(8.0);
+            right.label(RichText::new("Or use a listed tag instead").strong());
+            let mut map = false;
+            right.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.tags_view.map_to).hint_text("listed tag").desired_width(220.0));
+                let ok = self.lib.tags.resolve(&self.tags_view.map_to).is_ok();
+                map = ui.add_enabled(ok, egui::Button::new("Use it")).on_hover_text("These files get that tag instead").clicked();
+            });
+            let needle = if self.tags_view.map_to.trim().is_empty() { tag.clone() } else { self.tags_view.map_to.clone() };
+            if self.lib.tags.resolve(&self.tags_view.map_to).is_err() {
+                let suggestions: Vec<String> = self.lib.tags.suggest(&needle, 6).into_iter().map(str::to_string).collect();
+                if !suggestions.is_empty() {
+                    right.horizontal_wrapped(|ui| {
+                        ui.label(grey("Similar:").small());
+                        for s in suggestions {
+                            if ui.small_button(&s).clicked() {
+                                self.tags_view.map_to = s;
+                            }
+                        }
+                    });
+                }
+            }
+            if map {
+                let to = self.tags_view.map_to.clone();
+                let changed = self.lib.replace_unknown_tag(&tag, Some(&to));
+                self.lib.notify(format!("{changed} file(s) now have {to} instead of {tag}"));
+                self.tags_view.map_to.clear();
+                self.searched = None;
+            }
+            right.add_space(12.0);
+            if right.button(RichText::new("Remove from the files…").color(Color32::from_rgb(240, 140, 130))).clicked() {
+                self.tags_view.confirm = Some(Confirm::RemoveUnknown(tag.clone()));
+            }
+        });
+        if let Some(t) = pick {
+            self.tags_view.unknown = Some(t);
+            self.tags_view.map_to.clear();
+        }
+    }
+
     fn tags_confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(confirm) = &self.tags_view.confirm else { return };
         let count = |t: &str| self.lib.usage().iter().find(|(u, _)| u == t).map_or(0, |(_, n)| *n);
@@ -346,6 +454,9 @@ impl App {
             Confirm::Delete(t) => (format!("Delete {t}?"), format!("It is removed from the tag list and from {} open file(s).", count(t)), "Delete"),
             Confirm::DeletePool(p) => {
                 (format!("Delete the pool {p}?"), "The files stay; they just leave the pool and lose their page numbers.".to_string(), "Delete")
+            }
+            Confirm::RemoveUnknown(t) => {
+                (format!("Remove {t}?"), format!("It is taken off {} file(s) in the open collections and their sidecars.", count(t)), "Remove")
             }
         };
         let mut answer: Option<bool> = None;
@@ -395,6 +506,10 @@ impl App {
                     self.lib.notify(format!("Deleted the pool {p}"));
                     self.tags_view.pool = None;
                 }
+            }
+            Confirm::RemoveUnknown(t) => {
+                let n = self.lib.replace_unknown_tag(&t, None);
+                self.lib.notify(format!("Removed {t} from {n} file(s)"));
             }
         }
         self.searched = None;
