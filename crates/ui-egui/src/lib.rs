@@ -10,6 +10,7 @@ pub mod fonts;
 pub mod library;
 pub mod selection;
 pub mod suggest;
+mod tags_view;
 pub mod thumbnails;
 pub mod viewer;
 
@@ -40,6 +41,7 @@ const MAX_SIDEBAR_TAGS: usize = 300;
 pub enum Screen {
     Grid,
     Duplicates,
+    Tags,
 }
 
 /// Start-up options (from the command line).
@@ -57,8 +59,8 @@ pub struct Options {
     pub screenshot_after: Duration,
     /// Put the keyboard focus here at start-up: `search` or `tags`.
     pub focus: Option<String>,
-    /// Start on the Duplicates screen.
-    pub duplicates: bool,
+    /// Start on this screen instead of the grid.
+    pub screen: Option<Screen>,
 }
 
 pub struct App {
@@ -90,6 +92,7 @@ pub struct App {
     confirm_trash: Option<dupes_view::TrashPlan>,
     /// Missing files waiting for "Forget them?" to be confirmed.
     confirm_forget: Option<Vec<Hit>>,
+    tags_view: tags_view::TagsView,
     /// Searches to go back to after opening a stack (Backspace).
     back: Vec<String>,
 }
@@ -109,7 +112,7 @@ impl App {
         let lib = Library::new(dirs.clone(), config, options.collections.clone(), Arc::new(move || waker_ctx.request_repaint()));
         let thumbs = Thumbnails::new(ThumbCache::new(&dirs.cache), ctx);
         let query = options.query.clone().unwrap_or_default();
-        let screen = if options.duplicates { Screen::Duplicates } else { Screen::Grid };
+        let screen = options.screen.unwrap_or(Screen::Grid);
         App {
             lib,
             thumbs,
@@ -134,6 +137,7 @@ impl App {
             dupe_keep: HashMap::new(),
             confirm_trash: None,
             confirm_forget: None,
+            tags_view: tags_view::TagsView::default(),
             back: Vec::new(),
         }
     }
@@ -206,7 +210,7 @@ impl App {
                 }
                 continue;
             }
-            if self.screen == Screen::Duplicates && self.viewer.is_none() {
+            if self.screen != Screen::Grid && self.viewer.is_none() {
                 match key {
                     Key::Escape => self.screen = Screen::Grid,
                     Key::Slash => {
@@ -348,7 +352,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let count = format!("{} results", self.lib.hits.len());
-            let right_width = 540.0;
+            let right_width = 600.0;
             let width = (ui.available_width() - right_width).max(160.0);
             let bad = self.lib.query_error.is_some();
             let err_span = self.lib.query_error.as_ref().map(|(_, s)| s.clone());
@@ -379,6 +383,11 @@ impl App {
                 self.go_back();
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let on = self.screen == Screen::Tags;
+                if ui.selectable_label(on, "Tags").on_hover_text("The tag list: rename, merge, delete, namespaces, pools").clicked() {
+                    self.screen = if on { Screen::Grid } else { Screen::Tags };
+                    self.viewer = None;
+                }
                 let groups = self.lib.dupe_groups.len();
                 let on = self.screen == Screen::Duplicates;
                 let label = if groups > 0 { format!("Duplicates ({groups})") } else { "Duplicates".to_string() };
@@ -1203,12 +1212,15 @@ impl eframe::App for App {
             });
         }
         let dupes = self.screen == Screen::Duplicates && self.viewer.is_none();
-        if !dupes {
+        let tags_screen = self.screen == Screen::Tags && self.viewer.is_none();
+        if !dupes && !tags_screen {
             egui::Panel::right("tags").resizable(true).default_size(300.0).min_size(220.0).max_size(480.0).show(ui, |ui| self.tag_panel(ui));
         }
         egui::CentralPanel::default_margins().show(ui, |ui| {
             if dupes {
                 self.duplicates_screen(ui);
+            } else if tags_screen {
+                self.tags_screen(ui);
             } else if self.viewer.is_some() {
                 self.viewer_bar(ui);
                 let view = ui.available_rect_before_wrap();

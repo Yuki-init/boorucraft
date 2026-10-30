@@ -418,8 +418,12 @@ the visible tiles.
 - **Tag editor**: on the viewer and on a multi-selection (bulk add/remove), with
   autocomplete from the central tag list; type `artist:` to set a namespace. New tags need an
   explicit "Create tag".
-- **Tags** screen: the central list with counts in the open collections; create, describe,
-  rename, merge, delete, namespace colours; the "Unknown tags" review.
+- **Tags** screen (top bar, `--tags`): the central list with counts in the open collections,
+  filtered by name or description and sorted by name or use; create, describe, rename, merge
+  into another tag and delete (the last two ask first); a Namespaces tab (colour, add, remove:
+  removing only drops the grouping and colour) and a Pools tab (rename, delete). Changes are
+  saved to `tags.json` with a history entry and applied to open collections at once; closed
+  ones catch up when opened, and scans running at the time catch up when they finish.
 - **Duplicates** tab and **Collections** settings (add/remove folders, rescan, included file
   types, sidecar on/off and naming, thumbnail cache size, tag list location, rebuild from
   sidecars).

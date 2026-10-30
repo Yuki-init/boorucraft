@@ -265,6 +265,21 @@ impl TagList {
         Ok(())
     }
 
+    pub fn set_namespace_color(&mut self, name: &str, color: &str) -> Result<()> {
+        let info = self.data.namespaces.get_mut(name).ok_or_else(|| StoreError::Invalid(format!("no namespace `{name}`")))?;
+        info.color = color.trim().to_string();
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Stops treating `name:` as a namespace. Tags keep their names (`artist:foo` stays) and just
+    /// lose the grouping and colour, so nothing in the collections changes.
+    pub fn remove_namespace(&mut self, name: &str) -> Result<()> {
+        self.data.namespaces.remove(name).ok_or_else(|| StoreError::Invalid(format!("no namespace `{name}`")))?;
+        self.dirty = true;
+        Ok(())
+    }
+
     fn record(&mut self, op: HistoryOp) {
         self.data.revision = self.data.revision.saturating_add(1);
         self.data.history.push(HistoryEntry { revision: self.data.revision, op });

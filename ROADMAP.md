@@ -99,3 +99,7 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   the tag panel explaining that tags come back with the file, and "Forget…" with a
   confirmation (`Collection::forget_missing`: only missing entries, children unlinked);
   `boorucraft-cli forget-missing DIR [--yes]`. Open/Show in folder are disabled for them.
+- 2026-10-30 — M4.4: Tags screen (`--tags`): filter, sort by name or use, create, describe,
+  rename, merge, delete (with confirmations); namespaces (colour, add, remove) and pools
+  (rename, delete). Fixed: pool renames and deletes from the tag list didn't reindex or save
+  open collections (only tag changes did); scans that were running catch up when they finish.

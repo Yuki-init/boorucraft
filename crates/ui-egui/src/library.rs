@@ -599,6 +599,8 @@ impl Library {
         while let Ok(done) = self.scan_rx.try_recv() {
             changed = true;
             let ScanDone { coll, mut c, cache, report } = done;
+            // The tag list may have changed while the scan ran.
+            let caught_up = c.apply_tag_history(&self.tags);
             let summary = format!("{} files: {} new, {} moved, {} edited, {} missing", report.files, report.added, report.moved, report.edited, report.missing);
             let problems = report.errors.len() + report.sidecars.errors.len();
             let save_err = c.save().err();
@@ -611,6 +613,10 @@ impl Library {
                 self.dupes_stale = true;
                 oc.state = CollState::Ready { c, cache };
                 oc.last_report = Some(summary);
+                if !caught_up.is_empty() {
+                    oc.sidecars_pending.extend(caught_up);
+                    oc.dirty_since = Some(Instant::now());
+                }
                 name = oc.name.clone();
             }
             if problems > 0 {
@@ -815,17 +821,91 @@ impl Library {
     /// Loads tags.json from disk again and brings the open collections up to date with it.
     fn reload_tags(&mut self) -> Result<(), String> {
         self.tags.reload().map_err(|e| e.to_string())?;
+        self.catch_up_collections();
+        Ok(())
+    }
+
+    /// Applies tag-list changes recorded in its history (renames, merges, deletes, pool renames
+    /// and deletes) to the open collections: their files, indexes and sidecars.
+    fn catch_up_collections(&mut self) {
         for oc in &mut self.colls {
             let CollState::Ready { c, .. } = &mut oc.state else { continue };
+            let revision = c.tags_revision();
             let changed = c.apply_tag_history(&self.tags);
-            if !changed.is_empty() {
+            // Pool renames and deletes change no sidecar but still need indexing and saving.
+            if c.tags_revision() != revision {
                 oc.index = SearchIndex::build(c);
                 oc.dirty_since = Some(Instant::now());
                 oc.sidecars_pending.extend(changed);
             }
         }
         self.usage = None;
-        Ok(())
+        self.dupes_stale = true;
+    }
+
+    /// Changes the central tag list with `f`, saves it, and brings the open collections up to
+    /// date (closed ones catch up when next opened). Errors are reported and returned.
+    fn change_tags<T>(&mut self, f: impl FnOnce(&mut TagList) -> Result<T, StoreError>) -> Option<T> {
+        if self.tags.is_read_only() {
+            self.notify("The tag list is open in another BooruCraft; it can't be changed here");
+            return None;
+        }
+        if self.tags_outside_change {
+            self.notify("The tag list was changed by another program: choose a version first");
+            return None;
+        }
+        let out = match f(&mut self.tags) {
+            Ok(v) => v,
+            Err(e) => {
+                self.notify(e.to_string());
+                return None;
+            }
+        };
+        if let Err(e) = self.tags.save() {
+            self.notify(format!("Couldn't save the tag list: {e}"));
+        }
+        self.catch_up_collections();
+        Some(out)
+    }
+
+    /// Renames a tag everywhere. Returns the new name.
+    pub fn rename_tag(&mut self, from: &str, to: &str) -> Option<String> {
+        self.change_tags(|t| t.rename(from, to))
+    }
+
+    /// Folds `from` into `into`: files with `from` get `into` instead.
+    pub fn merge_tag(&mut self, from: &str, into: &str) -> Option<()> {
+        let into = self.tags.resolve(into).map_err(|e| self.notify(e.to_string())).ok()?;
+        self.change_tags(|t| t.merge(&[from], &into))
+    }
+
+    /// Removes a tag from the list and from every file.
+    pub fn delete_tag(&mut self, tag: &str) -> Option<()> {
+        self.change_tags(|t| t.delete(tag))
+    }
+
+    pub fn describe_tag(&mut self, tag: &str, text: &str) -> Option<()> {
+        self.change_tags(|t| t.set_description(tag, text))
+    }
+
+    pub fn add_namespace(&mut self, name: &str, color: &str) -> Option<()> {
+        self.change_tags(|t| t.add_namespace(name, color))
+    }
+
+    pub fn set_namespace_color(&mut self, name: &str, color: &str) -> Option<()> {
+        self.change_tags(|t| t.set_namespace_color(name, color))
+    }
+
+    pub fn remove_namespace(&mut self, name: &str) -> Option<()> {
+        self.change_tags(|t| t.remove_namespace(name))
+    }
+
+    pub fn rename_pool(&mut self, from: &str, to: &str) -> Option<String> {
+        self.change_tags(|t| t.rename_pool(from, to))
+    }
+
+    pub fn delete_pool(&mut self, name: &str) -> Option<()> {
+        self.change_tags(|t| t.delete_pool(name))
     }
 
     /// Loads a collection.json from disk again (dropping unsaved changes), then rewrites the
@@ -1923,6 +2003,65 @@ mod tests {
         assert_eq!(lib.hits, vec![b.clone()], "forgotten files leave the results");
         lib.flush_all();
         assert!(!std::fs::read_to_string(pics.join("collection.json")).unwrap().contains(&a.hash));
+    }
+
+    #[test]
+    fn tag_list_changes_reach_open_and_closed_collections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (one, two) = (tmp.path().join("one"), tmp.path().join("two"));
+        for d in [&one, &two] {
+            std::fs::create_dir_all(d).unwrap();
+            picture(&d.join("a.png"), 10);
+        }
+        let mut lib = libraries(tmp.path(), &[&one, &two]);
+        for t in ["cat", "kitty", "dog", "temp"] {
+            lib.create_tag(t);
+        }
+        lib.search("");
+        let all = lib.hits.clone();
+        lib.edit_tags(&all, &["kitty".into(), "dog".into(), "temp".into()], &[]);
+        lib.flush_all();
+        lib.close_collection(1);
+
+        assert_eq!(lib.merge_tag("kitty", "cat"), Some(()));
+        assert_eq!(lib.rename_tag("dog", "hound").as_deref(), Some("hound"));
+        assert_eq!(lib.delete_tag("temp"), Some(()));
+        assert_eq!(lib.rename_tag("hound", "cat"), None, "can't rename onto an existing tag");
+        assert_eq!(lib.merge_tag("cat", "cat"), None);
+        assert!(lib.describe_tag("cat", "  felines ").is_some());
+        assert_eq!(lib.tags.tags().find(|(t, _)| *t == "cat").unwrap().1.description, "felines");
+        lib.search("cat hound -temp -kitty");
+        assert_eq!(lib.hits.len(), 1);
+        lib.flush_all();
+        let xmp = std::fs::read_to_string(one.join("a.png.xmp")).unwrap();
+        assert!(xmp.contains("hound") && xmp.contains(">cat<") && !xmp.contains("kitty") && !xmp.contains("temp"), "{xmp}");
+
+        // The closed collection catches up when opened again.
+        assert!(std::fs::read_to_string(two.join("collection.json")).unwrap().contains("kitty"));
+        lib.open_collection(&two, false);
+        poll_until(&mut lib, "scan", |l| !l.is_busy());
+        lib.search("cat hound");
+        assert_eq!(lib.hits.len(), 2);
+        lib.flush_all();
+        assert!(!std::fs::read_to_string(two.join("a.png.xmp")).unwrap().contains("kitty"));
+
+        // Namespaces and pools.
+        assert!(lib.add_namespace("place", "#336699").is_some());
+        assert!(lib.add_namespace("place", "#000000").is_none(), "already exists");
+        assert!(lib.set_namespace_color("place", "#112233").is_some());
+        assert_eq!(lib.tags.namespaces().find(|(n, _)| *n == "place").unwrap().1.color, "#112233");
+        assert!(lib.remove_namespace("place").is_some());
+        assert!(!lib.tags.is_namespace("place"));
+        lib.create_pool("trip");
+        assert_eq!(lib.add_to_pool(&lib.hits.clone(), "trip"), 2);
+        lib.search("pool:trip");
+        assert_eq!(lib.hits.len(), 2, "in the pool before the rename");
+        assert_eq!(lib.rename_pool("trip", "holiday").as_deref(), Some("holiday"));
+        lib.search("pool:holiday");
+        assert_eq!(lib.hits.len(), 2);
+        assert!(lib.delete_pool("holiday").is_some());
+        lib.search("pool:any");
+        assert!(lib.hits.is_empty());
     }
 
     #[test]
