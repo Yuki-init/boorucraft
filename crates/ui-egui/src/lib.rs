@@ -30,6 +30,7 @@ use viewer::Viewer;
 
 const SEARCH_ID: &str = "search";
 const TAG_INPUT_ID: &str = "tag-input";
+const SEARCH_NAME_ID: &str = "saved-search-name";
 const POOL_INPUT_ID: &str = "pool-input";
 const GAP: f32 = 6.0;
 const ACCENT: Color32 = Color32::from_rgb(90, 150, 240);
@@ -93,6 +94,10 @@ pub struct App {
     /// Missing files waiting for "Forget them?" to be confirmed.
     confirm_forget: Option<Vec<Hit>>,
     tags_view: tags_view::TagsView,
+    /// The name being typed for "Save search", while that box is open.
+    naming_search: Option<String>,
+    /// A saved search being renamed: (its place, the new name so far).
+    renaming_search: Option<(usize, String)>,
     /// Searches to go back to after opening a stack (Backspace).
     back: Vec<String>,
 }
@@ -138,6 +143,8 @@ impl App {
             confirm_trash: None,
             confirm_forget: None,
             tags_view: tags_view::TagsView::default(),
+            naming_search: None,
+            renaming_search: None,
             back: Vec::new(),
         }
     }
@@ -977,7 +984,123 @@ impl App {
     }
 
     /// Left panel, below the collections: the tags of the current results.
+    /// Saved searches: click to run, right-click to rename, move or delete; "Save" keeps the
+    /// current one.
+    fn saved_searches(&mut self, ui: &mut egui::Ui) {
+        let can_save = !self.query.trim().is_empty() && self.lib.query_error.is_none();
+        let saved = self.lib.config.saved_searches.clone();
+        if saved.is_empty() && !can_save && self.naming_search.is_none() {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Saved searches").strong()).on_hover_text("Click: run it · Right-click: rename, move or delete");
+            if self.naming_search.is_none()
+                && ui.add_enabled(can_save, egui::Button::new("+ Save").small()).on_hover_text("Keep the current search under a name").clicked()
+            {
+                self.naming_search = Some(String::new());
+                self.focus = Some(SEARCH_NAME_ID);
+            }
+        });
+        if let Some(name) = &mut self.naming_search {
+            let mut done = None;
+            ui.horizontal(|ui| {
+                let resp = ui.add(egui::TextEdit::singleline(name).hint_text("name").desired_width(120.0));
+                if self.focus == Some(SEARCH_NAME_ID) {
+                    resp.request_focus();
+                    self.focus = None;
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) || ui.small_button("Save").clicked() {
+                    done = Some(true);
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) || ui.small_button("Cancel").clicked() {
+                    done = Some(false);
+                }
+            });
+            match done {
+                Some(true) => {
+                    let name = self.naming_search.take().unwrap_or_default();
+                    let query = self.query.clone();
+                    if !self.lib.save_search(&name, &query) && !name.trim().is_empty() {
+                        self.naming_search = Some(name);
+                    }
+                }
+                Some(false) => self.naming_search = None,
+                None => {}
+            }
+        }
+        let mut run = None;
+        let mut action = None;
+        for (i, s) in saved.iter().enumerate() {
+            if let Some((at, name)) = &mut self.renaming_search
+                && *at == i
+            {
+                let resp = ui.add(egui::TextEdit::singleline(name).desired_width(140.0));
+                if self.focus == Some(SEARCH_NAME_ID) {
+                    resp.request_focus();
+                    self.focus = None;
+                }
+                if resp.lost_focus() {
+                    let enter = ui.input(|inp| inp.key_pressed(Key::Enter));
+                    action = Some(if enter { (i, SavedAction::Rename(name.clone())) } else { (i, SavedAction::StopRenaming) });
+                }
+                continue;
+            }
+            let active = self.query.trim() == s.query;
+            let text = RichText::new(&s.name).color(Color32::from_rgb(150, 190, 240));
+            let resp = ui
+                .add(egui::Label::new(if active { text.strong().underline() } else { text }).sense(Sense::click()))
+                .on_hover_text(&s.query)
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
+                run = Some(s.query.clone());
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Rename").clicked() {
+                    action = Some((i, SavedAction::StartRenaming));
+                }
+                if ui.add_enabled(can_save && !active, egui::Button::new("Replace with the current search")).clicked() {
+                    action = Some((i, SavedAction::Replace));
+                }
+                if ui.add_enabled(i > 0, egui::Button::new("Move up")).clicked() {
+                    action = Some((i, SavedAction::Move(-1)));
+                }
+                if ui.add_enabled(i + 1 < saved.len(), egui::Button::new("Move down")).clicked() {
+                    action = Some((i, SavedAction::Move(1)));
+                }
+                if ui.button("Delete").clicked() {
+                    action = Some((i, SavedAction::Delete));
+                }
+            });
+        }
+        if let Some(q) = run {
+            self.query = q;
+            self.screen = Screen::Grid;
+        }
+        match action {
+            Some((i, SavedAction::StartRenaming)) => {
+                self.renaming_search = saved.get(i).map(|s| (i, s.name.clone()));
+                self.focus = Some(SEARCH_NAME_ID);
+            }
+            Some((i, SavedAction::Rename(name))) => {
+                self.lib.rename_saved_search(i, &name);
+                self.renaming_search = None;
+            }
+            Some((_, SavedAction::StopRenaming)) => self.renaming_search = None,
+            Some((i, SavedAction::Replace)) => {
+                if let Some(s) = saved.get(i) {
+                    let query = self.query.clone();
+                    self.lib.save_search(&s.name, &query);
+                }
+            }
+            Some((i, SavedAction::Move(by))) => self.lib.move_saved_search(i, by),
+            Some((i, SavedAction::Delete)) => self.lib.delete_saved_search(i),
+            None => {}
+        }
+        ui.add_space(6.0);
+    }
+
     fn results_sidebar(&mut self, ui: &mut egui::Ui) {
+        self.saved_searches(ui);
         let mut toggle: Option<String> = None;
         let pools = self.lib.pool_counts().to_vec();
         if !pools.is_empty() {
@@ -1567,6 +1690,16 @@ fn parse_color(s: &str) -> Option<Color32> {
     }
     let v = u32::from_str_radix(hex, 16).ok()?;
     Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// What the right-click menu of a saved search asked for.
+enum SavedAction {
+    StartRenaming,
+    Rename(String),
+    StopRenaming,
+    Replace,
+    Move(isize),
+    Delete,
 }
 
 /// The choice shown when another program changed a file this window has unsaved changes to.

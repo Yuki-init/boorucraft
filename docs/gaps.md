@@ -2,7 +2,7 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **M4**: M4.7 saved searches, M4.8 slideshow and fullscreen.
+1. **M4**: M4.8 slideshow and fullscreen.
 2. **UI polish**: fullscreen viewer; a progress count during scans (now only a spinner); thumbnails
    for videos (via PlayCraft's Rust decoders, see Later).
 

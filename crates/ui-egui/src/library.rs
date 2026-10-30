@@ -65,6 +65,16 @@ pub struct Config {
     /// Show each pool and each family of versions as one tile (default on).
     #[serde(default)]
     pub stacks: Option<bool>,
+    /// Searches kept in the sidebar, in the user's order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub saved_searches: Vec<SavedSearch>,
+}
+
+/// A search kept under a name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    pub name: String,
+    pub query: String,
 }
 
 impl Config {
@@ -1056,6 +1066,53 @@ impl Library {
             self.stack_hits();
         }
         self.recount();
+    }
+
+    /// Keeps `query` under `name` (replacing a saved search of that name). The query must parse.
+    /// Saved even for collections opened from the command line: it is an explicit choice.
+    pub fn save_search(&mut self, name: &str, query: &str) -> bool {
+        let (name, query) = (name.trim(), query.trim());
+        if name.is_empty() || query.is_empty() {
+            return false;
+        }
+        if let Err(e) = Query::parse(query) {
+            self.notify(format!("Can't save a search with an error: {}", e.message));
+            return false;
+        }
+        let saved = SavedSearch { name: name.to_string(), query: query.to_string() };
+        match self.config.saved_searches.iter_mut().find(|s| s.name == name) {
+            Some(s) => *s = saved,
+            None => self.config.saved_searches.push(saved),
+        }
+        self.save_config();
+        true
+    }
+
+    pub fn rename_saved_search(&mut self, idx: usize, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || self.config.saved_searches.iter().enumerate().any(|(i, s)| i != idx && s.name == name) {
+            self.notify(format!("There is already a saved search called {name}"));
+            return;
+        }
+        if let Some(s) = self.config.saved_searches.get_mut(idx) {
+            s.name = name.to_string();
+            self.save_config();
+        }
+    }
+
+    pub fn delete_saved_search(&mut self, idx: usize) {
+        if idx < self.config.saved_searches.len() {
+            self.config.saved_searches.remove(idx);
+            self.save_config();
+        }
+    }
+
+    /// Moves a saved search one place up (`-1`) or down (`1`).
+    pub fn move_saved_search(&mut self, idx: usize, by: isize) {
+        let len = self.config.saved_searches.len();
+        let Some(to) = idx.checked_add_signed(by).filter(|t| *t < len) else { return };
+        self.config.saved_searches.swap(idx, to);
+        self.save_config();
     }
 
     pub fn stacking(&self) -> bool {
@@ -2229,6 +2286,29 @@ mod tests {
         assert_eq!(lib.hits.len(), 1, "tag and rating came back from the sidecar");
         lib.flush_all();
         assert!(std::fs::read_to_string(&json).unwrap().contains("\"cat\""));
+    }
+
+    #[test]
+    fn saved_searches_are_kept_in_the_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        let mut lib = library(tmp.path(), &pics);
+        assert!(lib.save_search(" Holiday ", "trip* rating:s"));
+        assert!(lib.save_search("Wide", "ratio:>2"));
+        assert!(!lib.save_search("Bad", "rating:x"), "a search with an error isn't saved");
+        assert!(!lib.save_search("  ", "cat"));
+        assert!(lib.save_search("Wide", "ratio:>2.5"), "same name: replaced");
+        lib.move_saved_search(1, -1);
+        lib.rename_saved_search(0, "Holiday");
+        assert!(lib.messages.iter().any(|(m, _)| m.contains("already")));
+        lib.rename_saved_search(1, "Trips");
+        lib.delete_saved_search(7);
+        let names: Vec<_> = lib.config.saved_searches.iter().map(|s| (s.name.as_str(), s.query.as_str())).collect();
+        assert_eq!(names, [("Wide", "ratio:>2.5"), ("Trips", "trip* rating:s")]);
+        let dirs = lib.dirs.clone();
+        drop(lib);
+        assert_eq!(Config::load(&dirs).saved_searches.len(), 2, "saved to config.json");
     }
 
     #[test]

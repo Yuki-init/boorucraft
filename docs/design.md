@@ -417,8 +417,10 @@ the visible tiles.
 ## UI
 
 - **Top**: search bar with autocomplete and error underline; result count; collection picker.
-- **Left**: tag sidebar for the current results (tags with counts, grouped by namespace; click to
-  add, ctrl-click to exclude).
+- **Left**: saved searches (kept in `config.json` as name + query; click runs one, right-click
+  renames, replaces, moves or deletes; "+ Save" keeps the current search), then the tag sidebar
+  for the current results (tags with counts, grouped by namespace; click to add, ctrl-click to
+  exclude).
 - **Centre**: virtualised thumbnail grid, adjustable size; multi-select with shift and ctrl.
 - **Viewer**: fit, 1:1, zoom and pan, next/previous within the results, GIF/WebP animation,
   slideshow, fullscreen. Unsupported formats open externally (D10).

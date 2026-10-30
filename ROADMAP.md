@@ -111,3 +111,5 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   new to a collection now always have their sidecars read. A damaged `collection.json` can be
   recovered from its `.bak` or rebuilt from the sidecars (collection card, `boorucraft-cli
   recover`); a copy of the damaged file is kept in the config folder first.
+- 2026-10-30 — M4.7: saved searches in the sidebar (`config.json`): save the current search
+  under a name, run, rename, replace, reorder, delete. Searches with errors can't be saved.
