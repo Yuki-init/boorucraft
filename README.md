@@ -27,9 +27,10 @@ Status: pre-alpha; the desktop app and the command-line tool work. See
 
 Builds for Linux (AppImage, .deb, .rpm, Flatpak, Arch, tarball), Windows (MSI, portable zip),
 macOS (DMG) and FreeBSD are attached to each [release](https://github.com/Yuki-init/boorucraft/releases).
-They are made by `.github/workflows/release.yml` through the Craft suite's shared release
-workflow; the scripts are in `packaging/`. Test builds are unsigned, so Windows SmartScreen and
-macOS Gatekeeper will warn about them.
+They are made by `.github/workflows/release.yml` (a copy of the Craft suite's shared release
+workflow) and, for macOS, by `scripts/release-macos.sh` on a Mac; the scripts are in `packaging/`.
+The builds are not signed yet, so Windows SmartScreen and macOS Gatekeeper will warn about them
+(on a Mac: right-click the app ▸ Open).
 
 ## Try it
 

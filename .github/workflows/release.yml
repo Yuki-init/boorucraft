@@ -1,12 +1,14 @@
 name: Release
 
-# Builds every platform's packages through the Craft suite's shared release workflow, the way
-# FilmCraft does, and drafts a GitHub Release (v<version> from Cargo.toml) with them attached.
+# Builds every platform's packages and drafts a GitHub Release (v<version> from Cargo.toml) with
+# them attached, through craft-release.yml: BooruCraft's copy of the Craft suite's shared release
+# workflow (FilmCraft calls the shared one), without its paid macOS runner. The macOS DMG is
+# built on a Mac by scripts/release-macos.sh and added to the draft before it is published.
 #
 # - Run it by hand (Actions ▸ Release ▸ Run workflow) to test: builds are unsigned, and a
 #   version like 0.1.0-rc.1 can be given to draft a pre-release.
-# - Pushing to the `release` branch makes a real release. The shared workflow then requires the
-#   signing secrets below (set in the repo's `release` environment) and fails without them.
+# - Pushing to the `release` branch makes a real release. Builds are signed once the secrets
+#   below are set in the repo's `release` environment; until then Windows builds are unsigned.
 on:
   push:
     branches: [release]
@@ -26,8 +28,7 @@ concurrency:
 
 jobs:
   release:
-    # Tracked at @main like the Craft apps, so suite-wide fixes arrive without a PR here.
-    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+    uses: ./.github/workflows/craft-release.yml
     with:
       app-name: boorucraft
       app-title: BooruCraft
@@ -37,13 +38,9 @@ jobs:
       # No web build: the app reads folders on disk. No headless server.
       has-web: false
       has-server: false
+      # The suite's FreeBSD aarch64 cross build doesn't set up yet (no cmake package there).
+      freebsd-architectures: '["x86_64"]'
     secrets:
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
       WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}

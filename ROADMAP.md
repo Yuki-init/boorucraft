@@ -151,3 +151,7 @@ aliases and implications, watches folders for outside changes, and shows video t
   Flatpak bundle, Arch package, Windows MSI and portable zip (`packaging/windows`), macOS DMG
   (`packaging/macos`) and FreeBSD (the shared fallback), drafted as a GitHub Release. Unsigned
   until signing secrets are set.
+- 2026-10-30 — R3.3: releases without the suite's paid macOS runner. `craft-release.yml` is
+  BooruCraft's copy of the shared release workflow minus macOS (stable toolchain, unsigned
+  Windows allowed, FreeBSD x86_64 only); `scripts/release-macos.sh` builds the DMG on a Mac and
+  adds it to the draft. Fixed the Windows build (trash needs a COM threading feature).
