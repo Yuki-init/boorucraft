@@ -165,3 +165,9 @@ aliases and implications, watches folders for outside changes, and shows video t
   the RustCrypto provider (no C/asm crypto) and webpki-roots; honest user agent, ≥1 s between
   requests, 30 s timeout, 4 MiB response cap. Tests use saved real responses; a live test
   (`-- --ignored`) checks the TLS stack against the sites.
+- 2026-10-30 — B2: booru import. `index::booru` asks the sites in order, plans the change (only
+  additions: tags with aliases and implications, new tags created by default; rating and source
+  only where empty) and applies it; `booru.json` settings (owner-only, holds API keys) and a
+  `booru-lookups.json` cache so reruns skip pictures already asked about. CLI:
+  `booru import DIR [QUERY] [--site S] [--dry-run] [--again] [--no-create]`, `booru account`,
+  `booru settings`. Tried on Safebooru pictures: 8 of 8 tagged from Danbooru.

@@ -1,8 +1,9 @@
 //! Scanning collection folders: hashing, metadata, path tracking and XMP sidecar sync; duplicate
-//! groups across collections.
+//! groups across collections; importing tags from boorus.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+pub mod booru;
 pub mod cache;
 pub mod dupes;
 pub mod probe;

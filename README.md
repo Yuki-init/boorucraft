@@ -62,4 +62,5 @@ boorucraft-cli scan DIR                         index a folder (creates DIR/coll
 boorucraft-cli tag DIR FILE cat -dog --create   add cat, remove dog; --create adds new tags to the list
 boorucraft-cli search DIR "cat ~sky -dog rating:s"
 boorucraft-cli tags rename kitty cat            every collection catches up when next opened
+boorucraft-cli booru import DIR tagcount:0      tag untagged pictures from Danbooru/Safebooru by MD5
 ```

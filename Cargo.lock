@@ -280,11 +280,13 @@ dependencies = [
 name = "boorucraft-cli"
 version = "0.1.0"
 dependencies = [
+ "boorucraft-booru",
  "boorucraft-core",
  "boorucraft-dedup",
  "boorucraft-index",
  "boorucraft-store",
  "boorucraft-thumbs",
+ "chrono",
  "image",
  "rayon",
  "tempfile",
@@ -307,6 +309,7 @@ version = "0.1.0"
 name = "boorucraft-index"
 version = "0.1.0"
 dependencies = [
+ "boorucraft-booru",
  "boorucraft-core",
  "boorucraft-dedup",
  "boorucraft-store",

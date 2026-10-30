@@ -15,6 +15,7 @@ boorucraft-core = { workspace = true }
 boorucraft-store = { workspace = true }
 boorucraft-xmp = { workspace = true }
 boorucraft-dedup = { workspace = true }
+boorucraft-booru = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -2,9 +2,9 @@
 
 Pick from the top. Each item names its milestone.
 
-1. **Booru import** (Later): look files up by MD5 on Safebooru, Gelbooru or Danbooru and import
-   their tags and ratings (pure-Rust HTTPS: rustls with the RustCrypto provider; an honest user
-   agent, no bot-protection workarounds; API keys only where a site needs them).
+1. **Booru import in the app** (Later): B1 (lookups) and B2 (import, CLI `booru import`) are
+   done; next the desktop UI (an import action for the selection or a search, with progress, and
+   account settings), then Flatpak network access and docs.
 2. **Auto-tagger** (Later): a local ML tagger, in Rust.
 
 ## Known limitations

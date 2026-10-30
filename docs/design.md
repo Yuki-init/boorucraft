@@ -55,16 +55,17 @@ crates/
   core/      data types, query parser and AST (no IO, heavily unit-tested)
   store/     central tag list, collection.json format, load/save, locking, in-memory indexes, search
   xmp/       reading and updating XMP sidecars without losing other apps' data
-  index/     folder scanning, hashing, metadata, sidecar sync
+  index/     folder scanning, hashing, metadata, sidecar sync, booru import
   thumbs/    decoding pictures (Rust decoders only), thumbnail cache
   dedup/     perceptual hashes, BK-tree, grouping (pure functions, no IO)
+  booru/     booru post lookups by MD5 over HTTPS
   ui-egui/   search bar, grid, viewer, tag editor, duplicates view
 apps/
   boorucraft/      the desktop app
   boorucraft-cli/  headless scan / search / tag / dupes, for tests and scripting
 ```
 
-Dependencies only point downwards: `core` <- `store`, `xmp`, `dedup` <- `index`, `thumbs` <- `ui-egui` <- apps.
+Dependencies only point downwards: `core` <- `store`, `xmp`, `dedup`, `booru` <- `index`, `thumbs` <- `ui-egui` <- apps.
 
 ## Central tag list (D4b)
 
@@ -474,6 +475,34 @@ fullscreen and stops the slideshow.
 one after it, or before it if the user last stepped back, or the first in a looping slideshow at
 the end. Only one picture is kept ahead, to bound memory; the viewer takes it over if the user
 goes there, and drops it otherwise.
+
+## Booru import (B1–B2)
+
+Boorus identify posts by the MD5 of the file, which every collection entry stores (D6), so a
+picture saved from a booru without changes can get its tags back.
+
+- **Sites**: Danbooru (`/posts.json?tags=md5:…`), Gelbooru and Safebooru (the Gelbooru API,
+  `index.php?page=dapi&s=post&q=index&json=1&tags=md5:…`). Gelbooru answers only with a user id
+  and API key. They are asked in order (default Danbooru, Gelbooru when it has an account,
+  Safebooru); the first that has the post wins.
+- **Network**: HTTPS through `ureq` and rustls with the RustCrypto provider (D2: no C or
+  assembly crypto), Mozilla's roots from `webpki-roots`. The user agent says what is asking:
+  `BooruCraft/<version> (+https://github.com/Yuki-init/boorucraft)`. At least 1 s between
+  requests, a 30 s timeout, responses capped at 4 MiB. Bot protection is never worked around:
+  a site that refuses or asks to slow down (HTTP 401/403/429) is dropped for the rest of the
+  import.
+- **What changes**: an import only adds. Tags already on the file stay; the post's tags are
+  added (aliases resolved, implications added) and, by default, created in the tag list when
+  new. The rating and source are set only on files without one. Booru ratings map to BooruCraft's
+  three: general and safe → `s`, sensitive and questionable → `q`, explicit → `e`. The source
+  is the post's own source (usually the artist's page), else the booru post.
+- **Settings**: `booru.json` in the config folder (sites, accounts, the three choices above),
+  written owner-only because it holds API keys. The CLI reads keys from stdin, never from
+  arguments.
+- **Lookups**: `booru-lookups.json` in the cache folder records each site's answer per MD5 and
+  whether the post was imported. An import skips pictures every site said it doesn't have, or
+  whose post was already imported, for 90 days (`--again` asks anyway). A dry run records answers
+  but not imports, so the real import still applies them.
 
 ## Open questions
 

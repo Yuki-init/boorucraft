@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use boorucraft_booru::{BooruError, Client as BooruClient, Site};
 use boorucraft_core::{Query, Rating};
+use boorucraft_index::booru::{self, Account, BooruSettings, Lookups};
 use boorucraft_index::{ScanCache, SidecarReport, find_groups, needing_hashes, scan, set_hashes, write_sidecars};
 use boorucraft_store::{Collection, Links, SearchIndex, StoreError, TagList, paths};
 use rayon::prelude::*;
@@ -48,6 +50,15 @@ const USAGE: &str = "usage:
   boorucraft-cli tags imply TAG IMPLIED...   files given TAG also get IMPLIED (files that have
                                              TAG already get it as collections are next opened)
   boorucraft-cli tags unimply TAG IMPLIED... (files keep the tags they have)
+  boorucraft-cli booru import DIR [QUERY...] [--site S]... [--dry-run] [--again] [--no-create]
+                                             look the matching files up by MD5 on boorus and add
+                                             their tags; fill rating and source where empty. Sites
+                                             are asked in order (default: danbooru, gelbooru with an
+                                             account, safebooru); --again asks about files looked
+                                             up before; --no-create leaves out tags not in the list
+  boorucraft-cli booru account SITE USER     set SITE's account; reads the API key from stdin
+  boorucraft-cli booru account SITE none     remove it
+  boorucraft-cli booru settings              show the sites, accounts and choices
 
 Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
   rating:s,q  width:>1920  height:<=1080  ratio:16:9  mpixels:>2  filesize:<2MB
@@ -112,6 +123,7 @@ fn run(args: &[String]) -> Res {
         ["dupes", rest @ ..] if !rest.is_empty() => cmd_dupes(rest),
         ["tags", rest @ ..] => cmd_tags(rest),
         ["pools", rest @ ..] => cmd_pools(rest),
+        ["booru", rest @ ..] => cmd_booru(rest),
         ["--version" | "-V" | "version"] => {
             out!("boorucraft-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -450,6 +462,192 @@ fn ancestors(c: &Collection, hash: &str) -> Vec<String> {
         out.push(h);
     }
     out
+}
+
+fn cmd_booru(rest: &[&str]) -> Res {
+    match rest {
+        ["settings"] => {
+            let s = BooruSettings::load(&BooruSettings::path()).map_err(err)?;
+            out!("sites: {}", s.sites.join(", "));
+            out!("asked: {}", s.active_sites().iter().map(|s| s.id()).collect::<Vec<_>>().join(", "));
+            for (site, a) in &s.accounts {
+                out!("account: {site} {}", a.user);
+            }
+            out!("create tags: {}  fill rating: {}  fill source: {}", s.create_tags, s.fill_rating, s.fill_source);
+            out!("({})", BooruSettings::path().display());
+            Ok(())
+        }
+        ["account", site, user] => {
+            let site = Site::parse(site).ok_or_else(|| format!("unknown site `{site}` (safebooru, gelbooru or danbooru)"))?;
+            let path = BooruSettings::path();
+            let mut s = BooruSettings::load(&path).map_err(err)?;
+            if *user == "none" {
+                s.accounts.remove(site.id());
+                s.save(&path).map_err(err)?;
+                err!("removed the {site} account");
+                return Ok(());
+            }
+            err!("{site} API key for {user} (one line on stdin):");
+            let mut key = String::new();
+            std::io::stdin().read_line(&mut key).map_err(err)?;
+            let key = key.trim();
+            if key.is_empty() {
+                return Err("no API key given".into());
+            }
+            s.accounts.insert(site.id().into(), Account { user: user.to_string(), api_key: key.to_string() });
+            s.save(&path).map_err(err)?;
+            err!("saved the {site} account in {}", path.display());
+            Ok(())
+        }
+        ["import", dir, args @ ..] => cmd_booru_import(Path::new(dir), args),
+        _ => Err(format!("unrecognised booru command\n\n{USAGE}")),
+    }
+}
+
+fn cmd_booru_import(dir: &Path, args: &[&str]) -> Res {
+    let mut words = Vec::new();
+    let mut sites = Vec::new();
+    let (mut dry_run, mut again, mut no_create) = (false, false, false);
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--dry-run" => dry_run = true,
+            "--again" => again = true,
+            "--no-create" => no_create = true,
+            "--site" => {
+                let v = it.next().ok_or("--site needs safebooru, gelbooru or danbooru")?;
+                sites.push(Site::parse(v).ok_or_else(|| format!("unknown site `{v}`"))?);
+            }
+            _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
+            _ => words.push(a),
+        }
+    }
+    let mut settings = BooruSettings::load(&BooruSettings::path()).map_err(err)?;
+    if no_create {
+        settings.create_tags = false;
+    }
+    let mut sites = if sites.is_empty() { settings.active_sites() } else { sites };
+    for site in &sites {
+        if site.needs_key() && settings.credentials(*site).is_none() {
+            return Err(format!("{site} needs an account: boorucraft-cli booru account {} USER_ID", site.id()));
+        }
+    }
+    if sites.is_empty() {
+        return Err("no sites to ask (see boorucraft-cli booru settings)".into());
+    }
+
+    let query = words.join(" ");
+    let mut q = Query::parse(&query).map_err(|e| e.to_string())?;
+    let mut tags = open_tags(!dry_run)?;
+    tags.resolve_query_aliases(&mut q);
+    let (mut c, mut cache) = open_collection(dir, !dry_run, &tags)?;
+    let index = SearchIndex::build(&c);
+    let mut links = links_for(&c, &q);
+    links.parents = index.parents().map(str::to_string).collect();
+    let hits = index.search(&q, &links);
+
+    let lookups_path = Lookups::path();
+    let mut lookups = Lookups::load(&lookups_path);
+    let mut client = BooruClient::new();
+    let names: Vec<&str> = sites.iter().map(|s| s.id()).collect();
+    err!("{} file(s) to look up on {}{}", hits.len(), names.join(", "), if dry_run { " (dry run: nothing is changed)" } else { "" });
+
+    let (mut found, mut missing, mut skipped, mut failed, mut changed_files) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut pending: Vec<String> = Vec::new();
+    let mut unreachable_in_a_row = 0;
+    for hash in &hits {
+        let Some(entry) = c.get(hash) else { continue };
+        let shown = entry.paths.first().cloned().unwrap_or_else(|| hash.to_string());
+        let md5 = entry.md5.clone();
+        if !again && lookups.can_skip(&md5, &sites, chrono::Utc::now()) {
+            skipped += 1;
+            continue;
+        }
+        let result = booru::lookup(&mut client, &settings, &sites, &md5, &mut lookups);
+        let mut stop = false;
+        for e in &result.errors {
+            err!("{shown}: {e}");
+            match e {
+                // A refused key or a site that wants us to slow down: stop asking it.
+                BooruError::Refused { site, .. } | BooruError::RateLimited(site) => sites.retain(|s| s != site),
+                _ => {}
+            }
+        }
+        if !result.errors.is_empty() && result.post.is_none() {
+            failed += 1;
+            unreachable_in_a_row += usize::from(result.errors.iter().all(|e| matches!(e, BooruError::Network { .. })));
+            stop = unreachable_in_a_row >= 3 || sites.is_empty();
+        } else {
+            unreachable_in_a_row = 0;
+        }
+        match result.post {
+            None if result.errors.is_empty() => {
+                missing += 1;
+                out!("{shown}: not found");
+            }
+            None => {}
+            Some(post) => {
+                found += 1;
+                let Some(entry) = c.get(hash) else { continue };
+                let change = booru::plan(&post, entry, &tags, &settings);
+                let mut parts = vec![format!("+{} tag(s)", change.tag_count())];
+                if !change.create.is_empty() {
+                    parts.push(format!("{} new to the tag list", change.create.len()));
+                }
+                if !change.left_out.is_empty() {
+                    parts.push(format!("{} left out", change.left_out.len()));
+                }
+                if let Some(r) = change.rating {
+                    parts.push(format!("rating {}", r.code()));
+                }
+                if change.source.is_some() {
+                    parts.push("source".into());
+                }
+                out!("{shown}: {}  [{} #{}]", parts.join(", "), change.site, change.post_id);
+                if !dry_run {
+                    if booru::apply(&mut c, &mut tags, hash, &change).map_err(err)? {
+                        changed_files += 1;
+                        pending.push(hash.to_string());
+                    }
+                    lookups.mark_imported(&md5, change.site);
+                }
+            }
+        }
+        // Save as we go, so an interrupted import keeps what it did.
+        if pending.len() >= 25 || stop {
+            save_import(&mut c, &mut tags, &mut cache, &mut pending, &lookups, &lookups_path)?;
+        }
+        if stop {
+            err!("stopping: the sites can't be reached");
+            break;
+        }
+    }
+    if !dry_run {
+        save_import(&mut c, &mut tags, &mut cache, &mut pending, &lookups, &lookups_path)?;
+    } else if let Err(e) = lookups.save(&lookups_path) {
+        err!("warning: couldn't save the lookups: {e}");
+    }
+    err!("{found} found ({changed_files} changed), {missing} not found, {failed} failed, {skipped} skipped (looked up before; --again to ask again)");
+    if failed > 0 && found == 0 && missing == 0 { Err("no lookups succeeded".into()) } else { Ok(()) }
+}
+
+/// Saves the tag list, the collection, the sidecars of `pending` files and the lookups.
+fn save_import(c: &mut Collection, tags: &mut TagList, cache: &mut ScanCache, pending: &mut Vec<String>, lookups: &Lookups, lookups_path: &Path) -> Res {
+    if tags.is_dirty() {
+        tags.save().map_err(err)?;
+    }
+    save(c, cache)?;
+    let mut report = SidecarReport::default();
+    write_sidecars(c, tags, pending.iter().map(String::as_str), cache, &mut report);
+    print_errors(&report.errors);
+    pending.clear();
+    if let Err(e) = cache.save() {
+        err!("warning: couldn't save the scan cache: {e}");
+    }
+    if let Err(e) = lookups.save(lookups_path) {
+        err!("warning: couldn't save the lookups: {e}");
+    }
+    Ok(())
 }
 
 fn cmd_unknown(dir: &Path) -> Res {

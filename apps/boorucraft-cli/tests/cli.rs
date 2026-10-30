@@ -283,3 +283,43 @@ fn aliases_and_implications() {
     assert_eq!(e.ok(&["tags", "aliases"]), "");
     assert_eq!(names(&e.ok(&["search", dir, "animal"])).len(), 2, "files keep implied tags");
 }
+
+#[test]
+fn booru_accounts_and_offline_checks() {
+    let e = Env::new();
+    // The key is read from stdin and never printed.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_boorucraft-cli"))
+        .args(["booru", "account", "gelbooru", "1234"])
+        .env("BOORUCRAFT_CONFIG_DIR", e.home.path().join("config"))
+        .env("BOORUCRAFT_CACHE_DIR", e.home.path().join("cache"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"s3cret-key\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let settings = e.ok(&["booru", "settings"]);
+    assert!(settings.contains("account: gelbooru 1234"), "{settings}");
+    assert!(settings.contains("asked: danbooru, gelbooru, safebooru"), "{settings}");
+    assert!(!settings.contains("s3cret"));
+    let saved = std::fs::read_to_string(e.home.path().join("config").join("booru.json")).unwrap();
+    assert!(saved.contains("s3cret-key"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(e.home.path().join("config").join("booru.json")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "only the user can read the key");
+    }
+    e.ok(&["booru", "account", "gelbooru", "none"]);
+    assert!(e.ok(&["booru", "settings"]).contains("asked: danbooru, safebooru"));
+
+    // Mistakes are caught before any request.
+    e.ok(&["scan", e.dir()]);
+    assert!(e.fails(&["booru", "import", e.dir(), "--site", "gelbooru"]).contains("Gelbooru needs an account"));
+    assert!(e.fails(&["booru", "import", e.dir(), "--site", "e621"]).contains("unknown site"));
+    assert!(e.fails(&["booru", "account", "e621", "x"]).contains("unknown site"));
+    assert!(e.fails(&["booru", "import", e.dir(), "--frobnicate"]).contains("unknown option"));
+}
