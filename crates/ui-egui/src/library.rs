@@ -1259,6 +1259,41 @@ impl Library {
             }
             touched.insert(hit.coll);
         }
+        self.after_removal(hits, touched);
+        if let Some(e) = errors.first() {
+            self.notify(format!("Couldn't move to the trash: {e}"));
+        }
+        removed
+    }
+
+    /// Forgets the missing files among `hits` (files still on disk are left alone): their tags
+    /// and links go; nothing on disk changes. Returns how many were forgotten.
+    pub fn forget_missing(&mut self, hits: &[Hit]) -> usize {
+        let mut touched = BTreeSet::new();
+        let mut forgotten = 0;
+        for (coll, oc) in self.colls.iter_mut().enumerate() {
+            let CollState::Ready { c, .. } = &mut oc.state else { continue };
+            if c.is_read_only() {
+                continue;
+            }
+            let n = c.forget_missing(hits.iter().filter(|h| h.coll == coll).map(|h| h.hash.as_str())).len();
+            if n > 0 {
+                forgotten += n;
+                touched.insert(coll);
+            }
+        }
+        self.after_removal(hits, touched);
+        forgotten
+    }
+
+    /// How many files of a collection weren't found in its last scan.
+    pub fn missing_count(&self, coll: usize) -> usize {
+        self.colls.get(coll).map_or(0, |oc| oc.index.missing_count())
+    }
+
+    /// After entries were removed: children elsewhere lose their link to them, the touched
+    /// collections are reindexed and saved, and the results drop them.
+    fn after_removal(&mut self, hits: &[Hit], touched: BTreeSet<usize>) {
         // Children of removed files lose their parent link rather than point at nothing.
         let removed_hashes: HashSet<&str> = hits.iter().filter(|h| self.find(&h.hash).is_none()).map(|h| h.hash.as_str()).collect();
         let orphans: Vec<Hit> = removed_hashes.iter().flat_map(|h| self.children(h)).collect();
@@ -1279,10 +1314,6 @@ impl Library {
         self.usage = None;
         self.dupes_stale = true;
         self.recount();
-        if let Some(e) = errors.first() {
-            self.notify(format!("Couldn't move to the trash: {e}"));
-        }
-        removed
     }
 
     /// Adds a pool to the central list. Returns its normalised name.
@@ -1861,6 +1892,37 @@ mod tests {
         let xmp = std::fs::read_to_string(pics.join("a.png.xmp")).unwrap();
         std::fs::write(pics.join("a.png.xmp"), xmp.replacen("<rdf:li>cat</rdf:li>", "<rdf:li>cat</rdf:li><rdf:li>dog</rdf:li>", 1)).unwrap();
         poll_until(&mut lib, "sidecar read back", |l| l.colls[0].collection().is_some_and(|c| c.files().any(|(_, e)| e.tags.contains("dog"))));
+    }
+
+    #[test]
+    fn missing_files_can_be_forgotten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        picture(&pics.join("a.png"), 10);
+        picture(&pics.join("b.png"), 120);
+        picture(&pics.join("c.png"), 240);
+        let mut lib = library(tmp.path(), &pics);
+        lib.search("");
+        let all = lib.hits.clone();
+        let hit = |lib: &Library, name: &str| all.iter().find(|h| lib.entry(h).is_some_and(|e| e.paths.contains(name))).cloned().unwrap();
+        let (a, b, c) = (hit(&lib, "a.png"), hit(&lib, "b.png"), hit(&lib, "c.png"));
+        lib.set_parent(std::slice::from_ref(&c), Some(&a));
+        std::fs::remove_file(pics.join("a.png")).unwrap();
+        std::fs::remove_file(pics.join("b.png")).unwrap();
+        lib.start_scan(0);
+        poll_until(&mut lib, "scan", |l| !l.is_busy());
+        assert_eq!(lib.missing_count(0), 2);
+        lib.search("missing:yes");
+        assert_eq!(lib.hits.len(), 2);
+
+        assert_eq!(lib.forget_missing(&[a.clone(), c.clone()]), 1, "c is on disk and stays");
+        assert!(lib.entry(&a).is_none() && lib.entry(&c).is_some());
+        assert_eq!(lib.entry(&c).unwrap().parent, None, "its child lost the link");
+        assert_eq!(lib.missing_count(0), 1);
+        assert_eq!(lib.hits, vec![b.clone()], "forgotten files leave the results");
+        lib.flush_all();
+        assert!(!std::fs::read_to_string(pics.join("collection.json")).unwrap().contains(&a.hash));
     }
 
     #[test]

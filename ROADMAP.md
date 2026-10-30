@@ -95,3 +95,7 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   folder are watched; `index::classify` ignores BooruCraft's own writes (checked against the
   scan cache) and starts an incremental rescan 1 s after a real change: pictures added, edited,
   moved or deleted, folders, and sidecars edited by other apps (read back as before).
+- 2026-10-30 — M4.3: missing files: "N missing files" link on each collection card; a note in
+  the tag panel explaining that tags come back with the file, and "Forget…" with a
+  confirmation (`Collection::forget_missing`: only missing entries, children unlinked);
+  `boorucraft-cli forget-missing DIR [--yes]`. Open/Show in folder are disabled for them.

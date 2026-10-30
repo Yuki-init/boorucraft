@@ -88,6 +88,8 @@ pub struct App {
     /// The copy to keep in each duplicate group, by the group's first hash (default: the best).
     dupe_keep: HashMap<String, Hit>,
     confirm_trash: Option<dupes_view::TrashPlan>,
+    /// Missing files waiting for "Forget them?" to be confirmed.
+    confirm_forget: Option<Vec<Hit>>,
     /// Searches to go back to after opening a stack (Backspace).
     back: Vec<String>,
 }
@@ -131,6 +133,7 @@ impl App {
             screen,
             dupe_keep: HashMap::new(),
             confirm_trash: None,
+            confirm_forget: None,
             back: Vec::new(),
         }
     }
@@ -422,6 +425,7 @@ impl App {
         let mut rescan = None;
         let mut close = None;
         let mut settle = None;
+        let mut show_missing = false;
         if self.lib.tags_outside_change {
             settle = outside_change_box(ui, "The tag list (tags.json)", Outside::TagList).or(settle);
         }
@@ -450,6 +454,19 @@ impl App {
                 if let Some(r) = &oc.last_report {
                     ui.label(RichText::new(r).small().color(Color32::from_gray(120)));
                 }
+                let missing = oc.index.missing_count();
+                if missing > 0
+                    && ui
+                        .link(
+                            RichText::new(format!("{missing} missing file{}", if missing == 1 { "" } else { "s" }))
+                                .small()
+                                .color(Color32::from_rgb(235, 140, 130)),
+                        )
+                        .on_hover_text("Show files that weren't found in the last scan")
+                        .clicked()
+                {
+                    show_missing = true;
+                }
                 if oc.outside_change {
                     settle = outside_change_box(ui, "collection.json", Outside::Collection(i)).or(settle);
                 }
@@ -467,6 +484,10 @@ impl App {
                     }
                 });
             });
+        }
+        if show_missing {
+            self.query = "missing:yes".into();
+            self.screen = Screen::Grid;
         }
         if let Some((which, keep_mine)) = settle {
             self.lib.resolve_outside_change(which, keep_mine);
@@ -600,6 +621,7 @@ impl App {
         }
         egui::ScrollArea::vertical().id_salt("tag-panel").auto_shrink([false, false]).show(ui, |ui| {
             self.file_info(ui, &targets);
+            self.missing_note(ui, &targets);
             ui.separator();
             self.rating_row(ui, &targets);
             ui.separator();
@@ -615,6 +637,71 @@ impl App {
             ui.separator();
             self.family_section(ui, &targets);
         });
+    }
+
+    /// Explains missing files among the selection and offers to forget them.
+    fn missing_note(&mut self, ui: &mut egui::Ui, targets: &[Hit]) {
+        let missing: Vec<Hit> = targets.iter().filter(|h| self.lib.entry(h).is_some_and(|e| e.missing)).cloned().collect();
+        if missing.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        egui::Frame::new().fill(Color32::from_rgb(60, 35, 35)).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let head = match (missing.len(), targets.len()) {
+                (1, 1) => "Missing: not found in the folder".to_string(),
+                (n, t) if n == t => format!("All {n} files are missing"),
+                (n, t) => format!("{n} of the {t} selected files are missing"),
+            };
+            ui.label(RichText::new(head).strong().color(Color32::from_rgb(235, 140, 130)));
+            ui.label(
+                RichText::new(
+                    "Their tags are kept: if a file comes back, even renamed or in another folder, it is recognised by its content and gets them again.",
+                )
+                .small()
+                .color(Color32::from_gray(190)),
+            );
+            let label = if missing.len() == 1 { "Forget it…".to_string() } else { format!("Forget {} missing files…", missing.len()) };
+            if ui.small_button(label).on_hover_text("Remove them and their tags from the collection; nothing on disk changes").clicked() {
+                self.confirm_forget = Some(missing);
+            }
+        });
+    }
+
+    /// "Forget these missing files?", shown over everything until answered.
+    fn confirm_forget_dialog(&mut self, ctx: &egui::Context) {
+        let Some(hits) = &self.confirm_forget else { return };
+        let mut answer: Option<bool> = None;
+        let n = hits.len();
+        let tagged = hits.iter().filter_map(|h| self.lib.entry(h)).filter(|e| !e.tags.is_empty() || e.rating.is_some() || e.source.is_some()).count();
+        let resp = egui::Modal::new(egui::Id::unique("confirm-forget")).show(ctx, |ui| {
+            ui.set_max_width(480.0);
+            ui.heading(if n == 1 { "Forget this missing file?".to_string() } else { format!("Forget {n} missing files?") });
+            ui.add_space(4.0);
+            if tagged > 0 {
+                ui.label(format!("{tagged} of them have tags, a rating or a source, which will be lost if the file turns up later."));
+            }
+            ui.label(RichText::new("Only BooruCraft's record is removed; no file or sidecar is touched.").small().color(Color32::from_gray(160)));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Forget").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if resp.should_close() && answer.is_none() {
+            answer = Some(false);
+        }
+        let Some(yes) = answer else { return };
+        let Some(hits) = self.confirm_forget.take() else { return };
+        if yes {
+            let n = self.lib.forget_missing(&hits);
+            self.lib.notify(format!("Forgot {n} missing file{}", if n == 1 { "" } else { "s" }));
+            self.searched = None;
+        }
     }
 
     /// The pools of the selected files: remove, add (with autocomplete), create, and reorder
@@ -779,23 +866,21 @@ impl App {
         if let Some(t) = e.taken {
             ui.label(RichText::new(format!("Taken {}", t.format("%Y-%m-%d %H:%M"))).color(Color32::from_gray(150)));
         }
-        if e.missing {
-            ui.label(RichText::new("Missing: not found in the folder").color(Color32::from_rgb(230, 120, 110)));
-        }
         if let Some(oc) = self.lib.colls.get(hit.coll) {
             for p in &e.paths {
                 ui.label(RichText::new(format!("{}/{p}", oc.name)).small().color(Color32::from_gray(130)));
             }
         }
+        let on_disk = !e.missing;
         ui.horizontal(|ui| {
             let path = self.lib.path_of(hit);
-            if ui.small_button("Open in default app").clicked()
+            if ui.add_enabled(on_disk, egui::Button::new("Open in default app").small()).clicked()
                 && let Some(p) = &path
                 && let Err(e) = viewer::open_external(p)
             {
                 eprintln!("boorucraft: {e}");
             }
-            if ui.small_button("Show in folder").clicked()
+            if ui.add_enabled(on_disk, egui::Button::new("Show in folder").small()).clicked()
                 && let Some(p) = &path
                 && let Err(e) = viewer::show_in_folder(p)
             {
@@ -1140,6 +1225,7 @@ impl eframe::App for App {
         });
 
         self.confirm_trash_dialog(&ctx);
+        self.confirm_forget_dialog(&ctx);
         self.startup(&ctx);
         if let Some(wait) = self.lib.save_due() {
             ctx.request_repaint_after(wait);

@@ -123,6 +123,23 @@ fn info_and_unknown_tags() {
 }
 
 #[test]
+fn forget_missing() {
+    let e = Env::new();
+    let (dir, a) = (e.dir(), e.file("a.png"));
+    e.ok(&["scan", dir]);
+    e.ok(&["tag", dir, &a, "cat", "--create"]);
+    std::fs::remove_file(&a).unwrap();
+    e.ok(&["scan", dir]);
+    let listed = e.ok(&["forget-missing", dir]);
+    assert!(listed.contains("a.png  (1 tag)"), "{listed}");
+    assert!(e.read("collection.json").contains("\"cat\""), "listing changes nothing");
+    e.ok(&["forget-missing", dir, "--yes"]);
+    assert!(!e.read("collection.json").contains("\"cat\""));
+    assert_eq!(names(&e.ok(&["search", dir])), vec!["b.png"]);
+    assert_eq!(e.ok(&["forget-missing", dir]), "");
+}
+
+#[test]
 fn booru_face_tags() {
     let e = Env::new();
     let (dir, a) = (e.dir(), e.file("a.png"));

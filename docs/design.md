@@ -154,7 +154,10 @@ one collection or all open ones.
 - A subfolder that has its own `collection.json` is a separate collection and is skipped by the
   parent's scan.
 - Missing files (no path found on disk) keep their entry, marked missing in the UI, so tags come
-  back if the file reappears (matched by hash). The user can purge them.
+  back if the file reappears (matched by hash). Each collection card links to its missing files
+  (`missing:yes`); selecting them offers "Forget…" (after a confirmation), which removes only
+  their records: tags, pool places, "not duplicates" decisions, and children's links to them.
+  `boorucraft-cli forget-missing DIR` lists them, and forgets them with `--yes`.
 
 ### Saving safely
 

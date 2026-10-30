@@ -198,6 +198,7 @@ pub struct SearchIndex {
     tags: HashMap<String, RoaringBitmap>,
     ratings: [RoaringBitmap; 3],
     all: RoaringBitmap,
+    missing: usize,
 }
 
 impl SearchIndex {
@@ -207,6 +208,7 @@ impl SearchIndex {
             let Ok(id) = u32::try_from(index.rows.len()) else { break };
             index.rows.push(Row::new(hash, entry));
             index.all.insert(id);
+            index.missing += usize::from(entry.missing);
             for tag in &entry.tags {
                 index.tags.entry(tag.clone()).or_default().insert(id);
             }
@@ -225,6 +227,11 @@ impl SearchIndex {
 
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+
+    /// How many files weren't found in the last scan.
+    pub fn missing_count(&self) -> usize {
+        self.missing
     }
 
     /// How many files have `tag`.
@@ -435,6 +442,7 @@ mod tests {
         assert_eq!(search(&i, "kind:video"), vec!["d4d4"]);
         assert_eq!(search(&i, "animated:yes"), vec!["c3c3"]);
         assert_eq!(search(&i, "missing:yes"), vec!["b2b2"]);
+        assert_eq!(i.missing_count(), 1);
         assert_eq!(search(&i, "tagcount:0"), vec!["e5e5"]);
         assert_eq!(search(&i, "tagcount:>=2"), vec!["c3c3", "b2b2", "a1a1"]);
         assert_eq!(search(&i, "path:\"holiday 2023\""), vec!["a1a1"]);

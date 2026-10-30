@@ -22,6 +22,8 @@ const USAGE: &str = "usage:
   boorucraft-cli dupes DIR... [--threshold N] find near-duplicates (hashes missing pictures first;
                                              N is the most differing bits, default 6)
   boorucraft-cli unknown DIR                 tags used in DIR that aren't in the tag list
+  boorucraft-cli forget-missing DIR [--yes]  list files missing since the last scan; with --yes,
+                                             remove them and their tags (no file is touched)
   boorucraft-cli tags [PREFIX]               list tags (with descriptions)
   boorucraft-cli tags create TAG...
   boorucraft-cli tags describe TAG TEXT
@@ -91,6 +93,8 @@ fn run(args: &[String]) -> Res {
         ["info", dir, file] => cmd_info(Path::new(dir), Some(Path::new(file))),
         ["tag", dir, file, rest @ ..] if !rest.is_empty() => cmd_tag(Path::new(dir), Path::new(file), rest),
         ["unknown", dir] => cmd_unknown(Path::new(dir)),
+        ["forget-missing", dir] => cmd_forget_missing(Path::new(dir), false),
+        ["forget-missing", dir, "--yes"] => cmd_forget_missing(Path::new(dir), true),
         ["dupes", rest @ ..] if !rest.is_empty() => cmd_dupes(rest),
         ["tags", rest @ ..] => cmd_tags(rest),
         ["pools", rest @ ..] => cmd_pools(rest),
@@ -435,6 +439,29 @@ fn cmd_unknown(dir: &Path) -> Res {
         let hint = if hint.is_empty() { String::new() } else { format!("  (similar: {})", hint.join(", ")) };
         out!("{n:>6}  {t}{hint}");
     }
+    Ok(())
+}
+
+fn cmd_forget_missing(dir: &Path, yes: bool) -> Res {
+    let tags = open_tags(false)?;
+    let (mut c, cache) = open_collection(dir, yes, &tags)?;
+    let missing: Vec<String> = c.files().filter(|(_, e)| e.missing).map(|(h, _)| h.to_string()).collect();
+    for h in &missing {
+        let Some(e) = c.get(h) else { continue };
+        let paths: Vec<&str> = e.paths.iter().map(String::as_str).collect();
+        out!("{}  ({} tag{})", paths.join(", "), e.tags.len(), if e.tags.len() == 1 { "" } else { "s" });
+    }
+    if missing.is_empty() {
+        err!("no missing files (as of the last scan)");
+        return Ok(());
+    }
+    if !yes {
+        err!("{} missing file(s); run again with --yes to forget them", missing.len());
+        return Ok(());
+    }
+    let gone = c.forget_missing(missing.iter().map(String::as_str));
+    save(&mut c, &cache)?;
+    err!("forgot {} missing file(s)", gone.len());
     Ok(())
 }
 

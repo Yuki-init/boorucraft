@@ -282,6 +282,31 @@ impl Collection {
         removed
     }
 
+    /// Forgets the files among `hashes` that are missing on disk (the others are left alone):
+    /// their entries go, with their tags, pool places and "not duplicates" decisions, and files
+    /// here that named one as their parent lose that link. Nothing on disk changes. Returns the
+    /// hashes forgotten.
+    pub fn forget_missing<'a>(&mut self, hashes: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+        let mut gone = Vec::new();
+        for hash in hashes {
+            if self.data.files.get(hash).is_some_and(|e| e.missing) && self.data.files.remove(hash).is_some() {
+                gone.push(hash.to_string());
+            }
+        }
+        if gone.is_empty() {
+            return gone;
+        }
+        let set: BTreeSet<&str> = gone.iter().map(String::as_str).collect();
+        for entry in self.data.files.values_mut() {
+            if entry.parent.as_deref().is_some_and(|p| set.contains(p)) {
+                entry.parent = None;
+            }
+        }
+        self.data.not_duplicates.retain(|[a, b]| !set.contains(a.as_str()) && !set.contains(b.as_str()));
+        self.dirty = true;
+        gone
+    }
+
     /// The hash of the file at a relative path.
     pub fn hash_of_path(&self, rel: &str) -> Option<&str> {
         self.data.files.iter().find(|(_, e)| e.paths.contains(rel)).map(|(k, _)| k.as_str())
@@ -496,6 +521,28 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(COLLECTION_FILE)).unwrap();
         assert!(text.contains("\"format\": \"boorucraft-collection\""), "{text}");
         assert!(!text.contains("missing"), "false flags are left out");
+    }
+
+    #[test]
+    fn forgets_only_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Collection::open(dir.path()).unwrap();
+        let mut gone = entry("gone.png", &["cat"]);
+        gone.missing = true;
+        c.insert("aa".into(), gone);
+        let mut child = entry("child.png", &[]);
+        child.parent = Some("aa".into());
+        c.insert("bb".into(), child);
+        c.insert("cc".into(), entry("here.png", &["cat"]));
+        c.mark_not_duplicate("aa", "cc");
+        c.save().unwrap();
+        assert_eq!(c.forget_missing(["cc", "nope"]), Vec::<String>::new(), "files on disk are never forgotten");
+        assert!(!c.is_dirty());
+        assert_eq!(c.forget_missing(["aa", "cc"]), vec!["aa".to_string()]);
+        assert!(c.get("aa").is_none() && c.get("cc").is_some());
+        assert_eq!(c.get("bb").unwrap().parent, None, "the child loses its link");
+        assert!(!c.is_not_duplicate("aa", "cc"));
+        assert!(c.is_dirty());
     }
 
     #[test]
