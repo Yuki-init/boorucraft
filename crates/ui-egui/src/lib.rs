@@ -1384,7 +1384,8 @@ impl App {
             };
             if neg {
                 remove.push(t);
-            } else if self.lib.tags.contains(&t) {
+            } else if let Ok(t) = self.lib.tags.resolve(&t) {
+                // A tag, or an alias of one.
                 add.push(t);
             } else {
                 unknown.push(t.clone());

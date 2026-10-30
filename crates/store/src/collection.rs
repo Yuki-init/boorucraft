@@ -435,9 +435,11 @@ impl Collection {
             let before = entry.tags.clone();
             for op in &ops {
                 match op {
+                    // A tag gained through a rename or merge brings what it implies now.
                     HistoryOp::Rename { from, to } => {
                         if entry.tags.remove(from) {
                             entry.tags.insert(to.clone());
+                            entry.tags.extend(tags.implied_closure(to));
                         }
                     }
                     HistoryOp::Merge { from, into } => {
@@ -447,6 +449,7 @@ impl Collection {
                         }
                         if hit {
                             entry.tags.insert(into.clone());
+                            entry.tags.extend(tags.implied_closure(into));
                         }
                     }
                     HistoryOp::Delete { tag } => {
@@ -711,6 +714,13 @@ mod tests {
         c.edit_tags("b", &[], &["neko"], &tags).unwrap();
         assert_eq!(c.get("a").unwrap().tags, ["cat", "kitten"].map(String::from).into());
         assert_eq!(c.get("b").unwrap().tags, ["animal", "sky"].map(String::from).into());
+
+        // A tag gained through a merge brings its implications.
+        tags.create("kitty", "").unwrap();
+        c.insert("k".into(), entry("k.png", &["kitty"]));
+        tags.merge(&["kitty"], "cat").unwrap();
+        c.apply_tag_history(&tags);
+        assert_eq!(c.get("k").unwrap().tags, ["animal", "cat"].map(String::from).into());
 
         // A new implication reaches files that already have the tag.
         tags.add_implication("sky", "kitten").unwrap();

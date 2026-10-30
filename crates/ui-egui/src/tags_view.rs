@@ -1,6 +1,6 @@
 //! The Tags screen: the central tag list with how many files use each tag, and changes that reach
 //! every collection (open ones now, closed ones when next opened): create, describe, rename,
-//! merge, delete; namespace colours; pool names; and the review of unknown tags (used in files
+//! merge, delete, aliases and implications; namespace colours; pool names; and the review of unknown tags (used in files
 //! but not in the list).
 
 use super::*;
@@ -18,7 +18,15 @@ pub(crate) enum TagsTab {
 
 /// A change that needs a "are you sure?" first.
 enum Confirm {
-    Merge { from: String, into: String },
+    Merge {
+        from: String,
+        into: String,
+    },
+    /// Making an existing tag an alias merges it.
+    AliasTag {
+        alias: String,
+        tag: String,
+    },
     Delete(String),
     DeletePool(String),
     RemoveUnknown(String),
@@ -33,6 +41,8 @@ pub(crate) struct TagsView {
     rename: String,
     description: String,
     merge_into: String,
+    new_alias: String,
+    new_implied: String,
     new_tag: String,
     new_ns: String,
     new_ns_color: [u8; 3],
@@ -52,6 +62,8 @@ impl TagsView {
         self.rename = tag.to_string();
         self.description = tags.tags().find(|(t, _)| *t == tag).map(|(_, i)| i.description.clone()).unwrap_or_default();
         self.merge_into.clear();
+        self.new_alias.clear();
+        self.new_implied.clear();
     }
 }
 
@@ -99,7 +111,12 @@ impl App {
             .lib
             .tags
             .tags()
-            .filter(|(t, info)| needle.is_empty() || t.contains(&needle) || info.description.to_lowercase().contains(&needle))
+            .filter(|(t, info)| {
+                needle.is_empty()
+                    || t.contains(&needle)
+                    || info.description.to_lowercase().contains(&needle)
+                    || self.lib.tags.aliases_of(t).any(|a| a.contains(&needle))
+            })
             .map(|(t, info)| (t.to_string(), counts.get(t).copied().unwrap_or(0), info.description.clone()))
             .collect();
         if self.tags_view.by_count {
@@ -206,6 +223,11 @@ impl App {
         }
         ui.add_space(8.0);
 
+        self.alias_editor(ui, &tag, writable);
+        ui.add_space(8.0);
+        self.implication_editor(ui, &tag, writable);
+        ui.add_space(8.0);
+
         ui.label(RichText::new("Merge into another tag").strong());
         ui.label(grey("Files with this tag get the other one instead, and this tag is removed.").small());
         let mut merge = false;
@@ -231,6 +253,104 @@ impl App {
         ui.add_space(12.0);
         if ui.add_enabled(writable, egui::Button::new(RichText::new("Delete tag…").color(Color32::from_rgb(240, 140, 130)))).clicked() {
             self.tags_view.confirm = Some(Confirm::Delete(tag.clone()));
+        }
+    }
+
+    /// Other names for the tag: chips to remove, and a box to add one.
+    fn alias_editor(&mut self, ui: &mut egui::Ui, tag: &str, writable: bool) {
+        ui.label(RichText::new("Aliases").strong());
+        ui.label(grey("Other names: typing or searching one means this tag.").small());
+        let aliases: Vec<String> = self.lib.tags.aliases_of(tag).map(str::to_string).collect();
+        let mut remove = None;
+        if !aliases.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for a in &aliases {
+                    if ui.add_enabled(writable, egui::Button::new(format!("{a}  ×")).small()).on_hover_text("Remove this alias").clicked() {
+                        remove = Some(a.clone());
+                    }
+                }
+            });
+        }
+        let mut add = false;
+        ui.horizontal(|ui| {
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.tags_view.new_alias).hint_text("another name").desired_width(220.0));
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let ok = writable && !self.tags_view.new_alias.trim().is_empty();
+            // The button is drawn whether or not it is enabled.
+            let clicked = ui.add_enabled(ok, egui::Button::new("Add alias")).clicked();
+            add = ok && (clicked || enter);
+        });
+        if add {
+            let alias = normalize_tag(&self.tags_view.new_alias).unwrap_or_default();
+            if self.lib.tags.contains(&alias) {
+                self.tags_view.confirm = Some(Confirm::AliasTag { alias, tag: tag.to_string() });
+            } else if self.lib.add_alias(&self.tags_view.new_alias.clone(), tag).is_some() {
+                self.tags_view.new_alias.clear();
+            }
+        }
+        if let Some(a) = remove {
+            self.lib.remove_alias(&a);
+        }
+    }
+
+    /// The tags this one adds, and the tags that add it.
+    fn implication_editor(&mut self, ui: &mut egui::Ui, tag: &str, writable: bool) {
+        ui.label(RichText::new("Implies").strong());
+        ui.label(grey("Files given this tag get these too.").small());
+        let implies: Vec<String> = self.lib.tags.implies(tag).map(str::to_string).collect();
+        let implied_by: Vec<String> = self.lib.tags.implied_by(tag).map(str::to_string).collect();
+        let mut remove = None;
+        let mut go = None;
+        if !implies.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for i in &implies {
+                    if ui.small_button(i).on_hover_text("Show this tag").clicked() {
+                        go = Some(i.clone());
+                    }
+                    if ui.add_enabled(writable, egui::Button::new("×").small()).on_hover_text("Stop implying it (files keep it)").clicked() {
+                        remove = Some(i.clone());
+                    }
+                }
+            });
+        }
+        let mut add = false;
+        ui.horizontal(|ui| {
+            let resp = ui.add(egui::TextEdit::singleline(&mut self.tags_view.new_implied).hint_text("implied tag").desired_width(220.0));
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            let ok = writable && self.lib.tags.resolve(&self.tags_view.new_implied).is_ok_and(|t| t != tag);
+            let clicked = ui.add_enabled(ok, egui::Button::new("Add")).on_hover_text("Files that have this tag get it too").clicked();
+            add = ok && (clicked || enter);
+        });
+        if !self.tags_view.new_implied.trim().is_empty() && self.lib.tags.resolve(&self.tags_view.new_implied).is_err() {
+            ui.horizontal_wrapped(|ui| {
+                let suggestions: Vec<String> =
+                    self.lib.tags.suggest(&self.tags_view.new_implied, 6).into_iter().filter(|t| *t != tag).map(str::to_string).collect();
+                for s in suggestions {
+                    if ui.small_button(&s).clicked() {
+                        self.tags_view.new_implied = s;
+                    }
+                }
+            });
+        }
+        if !implied_by.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(grey("Implied by").small());
+                for t in &implied_by {
+                    if ui.small_button(t).on_hover_text("Show this tag").clicked() {
+                        go = Some(t.clone());
+                    }
+                }
+            });
+        }
+        if add && self.lib.add_implication(tag, &self.tags_view.new_implied.clone()).is_some() {
+            self.tags_view.new_implied.clear();
+            self.searched = None;
+        }
+        if let Some(i) = remove {
+            self.lib.remove_implication(tag, &i);
+        }
+        if let Some(t) = go {
+            self.tags_view.select(&self.lib.tags, &t);
         }
     }
 
@@ -451,6 +571,11 @@ impl App {
                 format!("{} open file(s) with {from} get {into} instead, and {from} is removed from the tag list.", count(from)),
                 "Merge",
             ),
+            Confirm::AliasTag { alias, tag } => (
+                format!("Make the tag {alias} an alias of {tag}?"),
+                format!("{alias} is a tag of its own. {} open file(s) with it get {tag} instead, and from then on {alias} means {tag}.", count(alias)),
+                "Make alias",
+            ),
             Confirm::Delete(t) => (format!("Delete {t}?"), format!("It is removed from the tag list and from {} open file(s).", count(t)), "Delete"),
             Confirm::DeletePool(p) => {
                 (format!("Delete the pool {p}?"), "The files stay; they just leave the pool and lose their page numbers.".to_string(), "Delete")
@@ -493,6 +618,12 @@ impl App {
                 if self.lib.merge_tag(&from, &into).is_some() {
                     self.lib.notify(format!("Merged {from} into {into}"));
                     self.tags_view.select(&self.lib.tags, &into);
+                }
+            }
+            Confirm::AliasTag { alias, tag } => {
+                if self.lib.add_alias(&alias, &tag).is_some() {
+                    self.lib.notify(format!("{alias} is now an alias of {tag}"));
+                    self.tags_view.select(&self.lib.tags, &tag);
                 }
             }
             Confirm::Delete(t) => {

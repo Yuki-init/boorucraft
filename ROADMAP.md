@@ -128,3 +128,6 @@ finds and reviews near-duplicates, and groups files into pools and families of v
   tag) and implications (`cat` → `animal`, followed through chains, loops refused; new ones
   reach files already tagged through the history), in tags.json version 2 and the CLI
   (`tags alias|unalias|imply|unimply|aliases|implications`).
+- 2026-10-30 — L2: aliases and implications on the Tags screen (the tag editor lists and edits
+  them; the filter matches aliases); the side panel's tag box takes aliases. A tag gained through
+  a rename or merge now brings what it implies.

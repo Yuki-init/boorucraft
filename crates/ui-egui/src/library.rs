@@ -1018,6 +1018,24 @@ impl Library {
         self.change_tags(|t| t.delete(tag))
     }
 
+    /// Makes `alias` another name for `tag` (an existing tag `alias` is merged into `tag`).
+    pub fn add_alias(&mut self, alias: &str, tag: &str) -> Option<()> {
+        self.change_tags(|t| t.add_alias(alias, tag))
+    }
+
+    pub fn remove_alias(&mut self, alias: &str) -> Option<()> {
+        self.change_tags(|t| t.remove_alias(alias))
+    }
+
+    /// Makes `tag` imply `implied`; open collections' files with `tag` get it at once.
+    pub fn add_implication(&mut self, tag: &str, implied: &str) -> Option<()> {
+        self.change_tags(|t| t.add_implication(tag, implied))
+    }
+
+    pub fn remove_implication(&mut self, tag: &str, implied: &str) -> Option<()> {
+        self.change_tags(|t| t.remove_implication(tag, implied))
+    }
+
     pub fn describe_tag(&mut self, tag: &str, text: &str) -> Option<()> {
         self.change_tags(|t| t.set_description(tag, text))
     }
@@ -2205,6 +2223,44 @@ mod tests {
         assert_eq!(lib.hits, vec![b.clone()], "forgotten files leave the results");
         lib.flush_all();
         assert!(!std::fs::read_to_string(pics.join("collection.json")).unwrap().contains(&a.hash));
+    }
+
+    #[test]
+    fn aliases_and_implications_reach_open_collections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let one = tmp.path().join("one");
+        std::fs::create_dir_all(&one).unwrap();
+        picture(&one.join("a.png"), 10);
+        picture(&one.join("b.png"), 11);
+        let mut lib = libraries(tmp.path(), &[&one]);
+        for t in ["cat", "animal", "kitty"] {
+            lib.create_tag(t);
+        }
+        lib.search("");
+        let all = lib.hits.clone();
+        lib.edit_tags(&all[..1], &["kitty".into()], &[]);
+        lib.edit_tags(&all[1..], &["cat".into()], &[]);
+        assert_eq!(lib.add_implication("cat", "animal"), Some(()));
+        lib.search("animal");
+        assert_eq!(lib.hits.len(), 1, "the file with cat got animal at once");
+        assert_eq!(lib.add_alias("kitty", "cat"), Some(()), "an existing tag is merged");
+        lib.search("kitty");
+        assert_eq!(lib.hits.len(), 2, "searching an alias finds its tag");
+        lib.search("animal");
+        assert_eq!(lib.hits.len(), 2, "kitty merged into cat brings what cat implies");
+        lib.edit_tags(&all, &[], &["animal".into()]);
+        lib.edit_tags(&all, &["kitty".into()], &[]);
+        lib.search("animal");
+        assert_eq!(lib.hits.len(), 2, "adding by alias brings them too");
+        lib.flush_all();
+        for f in ["a.png.xmp", "b.png.xmp"] {
+            let xmp = std::fs::read_to_string(one.join(f)).unwrap();
+            assert!(xmp.contains(">animal<") && xmp.contains(">cat<") && !xmp.contains("kitty"), "{xmp}");
+        }
+        assert_eq!(lib.add_implication("animal", "cat"), None, "a loop");
+        assert_eq!(lib.remove_implication("cat", "animal"), Some(()));
+        assert_eq!(lib.remove_alias("kitty"), Some(()));
+        assert_eq!(lib.tags.aliases().count() + lib.tags.implications().count(), 0);
     }
 
     #[test]

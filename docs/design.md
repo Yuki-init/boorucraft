@@ -447,8 +447,10 @@ the visible tiles.
   autocomplete from the central tag list; type `artist:` to set a namespace. New tags need an
   explicit "Create tag".
 - **Tags** screen (top bar, `--tags`): the central list with counts in the open collections,
-  filtered by name or description and sorted by name or use; create, describe, rename, merge
-  into another tag and delete (the last two ask first); a Namespaces tab (colour, add, remove:
+  filtered by name, alias or description and sorted by name or use; create, describe, rename,
+  aliases (add, remove; making an existing tag an alias asks first, as it merges), implications
+  (add with suggestions, remove, and "implied by" links), merge into another tag and delete (the
+  last two ask first); a Namespaces tab (colour, add, remove:
   removing only drops the grouping and colour) and a Pools tab (rename, delete). Changes are
   saved to `tags.json` with a history entry and applied to open collections at once; closed
   ones catch up when opened, and scans running at the time catch up when they finish.
