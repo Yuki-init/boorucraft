@@ -1,0 +1,18 @@
+[package]
+name = "boorucraft-booru"
+description = "Looks pictures up by MD5 on Safebooru, Gelbooru and Danbooru and reads their tags"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+boorucraft-core = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { workspace = true }
+rustls-rustcrypto = { workspace = true }

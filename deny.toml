@@ -37,6 +37,8 @@ exceptions = [
     { crate = "symphonia-format-isomp4", allow = ["MPL-2.0"] },
     { crate = "symphonia-format-ogg", allow = ["MPL-2.0"] },
     { crate = "symphonia-format-riff", allow = ["MPL-2.0"] },
+    # Mozilla's root certificates for booru HTTPS; CDLA-Permissive-2.0 is a permissive data licence.
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [licenses.private]

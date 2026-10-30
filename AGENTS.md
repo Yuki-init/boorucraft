@@ -51,7 +51,7 @@ People trust an organiser with their only copy of their pictures. **This outrank
 | Layer | Crates |
 |---|---|
 | L0 | `core`: tag names, ratings, the query language (no IO) |
-| L1 | `store`: tag list, collection.json, saving and locking, search index; `xmp`: sidecars; `dedup`: perceptual hashes, BK-tree, grouping (pure functions) |
+| L1 | `store`: tag list, collection.json, saving and locking, search index; `xmp`: sidecars; `dedup`: perceptual hashes, BK-tree, grouping (pure functions); `booru`: post lookups by MD5 over HTTPS |
 | L2 | `index`: scanning, hashing, metadata, sidecar sync, duplicate groups across collections; `thumbs`: decoding, thumbnail cache, perceptual hashes of thumbnails |
 | L3 | `ui-egui`: the window (search, grid, viewer, tag editor) |
 | L4 | apps: `boorucraft-cli`, `boorucraft` desktop |

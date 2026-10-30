@@ -24,6 +24,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("boorucraft-store", 1),
     ("boorucraft-xmp", 1),
     ("boorucraft-dedup", 1),
+    ("boorucraft-booru", 1),
     ("boorucraft-index", 2),
     ("boorucraft-thumbs", 2),
     ("boorucraft-ui-egui", 3),

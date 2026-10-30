@@ -160,3 +160,8 @@ aliases and implications, watches folders for outside changes, and shows video t
 - 2026-10-30 — Published v0.1.0-rc.1 as a pre-release for testing (Linux and Windows; macOS to be
   added from a Mac). R3.8: pre-release Arch packages get a version the suite's arch-package
   action can read (0.1.0rc1) instead of 0.0.0; rc.1's were rebuilt the same way by hand.
+- 2026-10-30 — B1: `crates/booru` looks a picture up by MD5 on Safebooru, Gelbooru (API key)
+  or Danbooru and reads its tags, rating, source and post URL. HTTPS through ureq + rustls with
+  the RustCrypto provider (no C/asm crypto) and webpki-roots; honest user agent, ≥1 s between
+  requests, 30 s timeout, 4 MiB response cap. Tests use saved real responses; a live test
+  (`-- --ignored`) checks the TLS stack against the sites.

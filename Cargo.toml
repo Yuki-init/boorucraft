@@ -17,6 +17,7 @@ boorucraft-core = { path = "crates/core" }
 boorucraft-store = { path = "crates/store" }
 boorucraft-xmp = { path = "crates/xmp" }
 boorucraft-dedup = { path = "crates/dedup" }
+boorucraft-booru = { path = "crates/booru" }
 # Layer L2: scanning folders; thumbnails.
 boorucraft-index = { path = "crates/index" }
 boorucraft-thumbs = { path = "crates/thumbs" }
@@ -48,6 +49,10 @@ filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "fed0f4
 # Tests only: writing small Matroska videos (craft-media at the revision FilmCraft uses).
 craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "92d392cff132eaf53e13afff77f38b5c11b73aa0", default-features = false, features = ["matroska", "bitstream"] }
 open = "5"
+# Booru lookups over HTTPS. rustls with the RustCrypto provider, so no C or assembly crypto
+# (ring, aws-lc) is built; Mozilla's root certificates come from webpki-roots.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip"] }
+rustls-rustcrypto = "0.0.2-alpha"
 # Windows needs a COM threading model; apartment-threaded is trash's default and suits a GUI.
 trash = { version = "5", default-features = false, features = ["coinit_apartmentthreaded"] }
 # File watching: inotify on Linux (FFI declarations only, no C is compiled).
