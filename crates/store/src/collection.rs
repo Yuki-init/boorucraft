@@ -102,6 +102,10 @@ pub struct FileEntry {
     /// No copy was found on disk in the last scan. Kept so tags return if the file does.
     #[serde(default, skip_serializing_if = "is_false")]
     pub missing: bool,
+    /// SHA-256 of the parent file (this one is an edit, crop or alternate version of it). The
+    /// parent may be in another collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl FileEntry {
@@ -124,6 +128,7 @@ impl FileEntry {
             phash: None,
             dhash: None,
             missing: false,
+            parent: None,
         }
     }
 }

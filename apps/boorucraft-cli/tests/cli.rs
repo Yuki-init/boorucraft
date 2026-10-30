@@ -152,4 +152,15 @@ fn near_duplicates() {
     found.sort();
     assert_eq!(found, vec!["big.png", "small.jpg"]);
     assert!(e.fails(&["dupes", dir, "--threshold", "99"]).contains("--threshold"));
+
+    // Linked as versions: no longer duplicates.
+    let (big, small) = (e.file("big.png"), e.file("small.jpg"));
+    e.ok(&["tag", dir, &small, "--parent", &big]);
+    assert!(e.ok(&["info", dir, &small]).contains("parent:   big.png"));
+    assert!(e.ok(&["info", dir, &big]).contains("children: small.jpg"));
+    assert!(e.fails(&["tag", dir, &big, "--parent", &small]).contains("own parent"));
+    assert!(e.ok(&["dupes", dir]).is_empty());
+    assert_eq!(names(&e.ok(&["search", dir, "child:yes"])), vec!["big.png"]);
+    e.ok(&["tag", dir, &small, "--parent", "none"]);
+    assert!(e.ok(&["search", dir, "parent:any"]).is_empty());
 }

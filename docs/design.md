@@ -292,6 +292,7 @@ container crates. Playback would still go to the system player.
 | `md5:…` `hash:3fa9` | exact MD5 (32 hex digits) / SHA-256 prefix (4+ digits) |
 | `missing:yes` | the file wasn't found in the last scan |
 | `dupes:yes` `dupes:no` | has a near-duplicate in the open collections |
+| `parent:3fa9` `parent:none` `parent:any` `child:yes` | a file and its versions (SHA-256 prefix); files without / with a parent; files with versions |
 | `order:date` `order:-date` `order:filesize` `order:name` `order:random` | sort order, one per search |
 
 Values with spaces go in double quotes. Calendar dates are in UTC, the same way EXIF times are
@@ -340,6 +341,23 @@ their namespace colour; then metatag names with an example, and values after `ra
   - **Show in grid**: searches `~hash:… ~hash:…` for the group.
   - A slider sets the threshold (0–12 bits, saved in `config.json`).
   At most 200 groups are drawn at once.
+
+## Versions: parent and child (M3.3)
+
+A file can be linked as a version (edit, crop, alternate, page variant) of another: its entry
+gets `"parent": "<sha-256>"`. The parent may be in another open collection. One file has at most
+one parent; a parent can have any number of children, and chains are allowed but loops are
+refused.
+
+- **Tag panel → Versions**: one file shows its parent (link, Unlink) and how many versions it
+  has; several selected files get "Make “x” the parent of the other n" (x is the file with the
+  keyboard cursor) and "Unlink them from their parents". The links show the family
+  (`parent:<hash>`).
+- **Duplicates**: a parent, its children and siblings are never grouped as duplicates; "Make
+  variants" on a group links the others to the chosen copy. Keeping one copy moves the trashed
+  copies' children to it; trashing a parent otherwise unlinks its children.
+- **CLI**: `tag DIR FILE --parent OTHER|none`; `info` shows parent and children.
+- Not written to XMP sidecars (other apps have no field for it); `collection.json` only.
 
 ## UI
 

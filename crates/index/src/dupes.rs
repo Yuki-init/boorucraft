@@ -33,6 +33,11 @@ pub fn needing_hashes(c: &Collection) -> Vec<(String, PathBuf, String)> {
         .collect()
 }
 
+/// Are two files linked as parent and child, or children of the same parent?
+pub fn family(hash_a: &str, a: &FileEntry, hash_b: &str, b: &FileEntry) -> bool {
+    a.parent.as_deref() == Some(hash_b) || b.parent.as_deref() == Some(hash_a) || (a.parent.is_some() && a.parent == b.parent)
+}
+
 /// "Better" copies first: more pixels, then bigger files, then the one imported first.
 fn better(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
     let px = |e: &FileEntry| u64::from(e.width.unwrap_or(0)) * u64::from(e.height.unwrap_or(0));
@@ -41,9 +46,9 @@ fn better(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
 
 /// Groups of near-duplicates over the given collections (`None` entries are skipped but keep
 /// their position). Missing files are left out. Pairs marked "not duplicates" in either
-/// collection stay apart, and so do pairs `related(a, b)` says are linked some other way.
-/// Each group lists the best copy first.
-pub fn find_groups(colls: &[Option<&Collection>], threshold: u32, related: impl Fn(&Member, &Member) -> bool) -> Vec<Vec<Member>> {
+/// collection stay apart, and so do parents, children and siblings (versions the user already
+/// linked). Each group lists the best copy first.
+pub fn find_groups(colls: &[Option<&Collection>], threshold: u32) -> Vec<Vec<Member>> {
     let mut members: Vec<Member> = Vec::new();
     let mut items: Vec<Hashes> = Vec::new();
     for (ci, c) in colls.iter().enumerate() {
@@ -61,7 +66,7 @@ pub fn find_groups(colls: &[Option<&Collection>], threshold: u32, related: impl 
     let marked = |a: &Member, b: &Member| [a.0, b.0].iter().any(|ci| colls.get(*ci).copied().flatten().is_some_and(|c| c.is_not_duplicate(&a.1, &b.1)));
     let entry = |m: &Member| colls.get(m.0).copied().flatten().and_then(|c| c.get(&m.1));
     let mut out: Vec<Vec<Member>> = groups(&items, threshold, |i, j| match (members.get(i), members.get(j)) {
-        (Some(a), Some(b)) => marked(a, b) || related(a, b),
+        (Some(a), Some(b)) => marked(a, b) || entry(a).zip(entry(b)).is_some_and(|(x, y)| family(&a.1, x, &b.1, y)),
         _ => true,
     })
     .into_iter()

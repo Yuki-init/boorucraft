@@ -14,8 +14,9 @@ const USAGE: &str = "usage:
   boorucraft-cli scan DIR                    index a folder (creates DIR/collection.json)
   boorucraft-cli search DIR [QUERY...]       list matching files (see Searches below)
   boorucraft-cli info DIR [FILE]             collection summary, or one file's details
-  boorucraft-cli tag DIR FILE TAG... [--rating s|q|e|none] [--source URL|none] [--create]
-                                             TAG adds, -TAG removes; --create adds new tags to the list
+  boorucraft-cli tag DIR FILE [TAG...] [--rating s|q|e|none] [--source URL|none] [--parent FILE|none] [--create]
+                                             TAG adds, -TAG removes; --create adds new tags to the list;
+                                             --parent links FILE as a version of another file
   boorucraft-cli dupes DIR... [--threshold N] find near-duplicates (hashes missing pictures first;
                                              N is the most differing bits, default 6)
   boorucraft-cli unknown DIR                 tags used in DIR that aren't in the tag list
@@ -30,7 +31,7 @@ const USAGE: &str = "usage:
 
 Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
   rating:s,q  width:>1920  height:<=1080  ratio:16:9  mpixels:>2  filesize:<2MB
-  type:png,gif  kind:video  animated:yes  missing:yes  dupes:yes  tagcount:0  md5:…  hash:3fa9
+  type:png,gif  kind:video  animated:yes  missing:yes  dupes:yes  parent:3fa9  child:yes  tagcount:0  md5:…  hash:3fa9
   date:2024-01..2024-06  date:>2023-05-01  imported:<7d  path:\"holiday 2023\"  source:none
   order:date  order:-filesize  order:name  order:random  (default: newest imported first)
 Environment: BOORUCRAFT_TAGS (tag list file), BOORUCRAFT_CONFIG_DIR, BOORUCRAFT_CACHE_DIR";
@@ -135,7 +136,8 @@ fn cmd_search(dir: &Path, query: &str) -> Res {
     let tags = open_tags(false)?;
     let (c, _) = open_collection(dir, false, &tags)?;
     let index = SearchIndex::build(&c);
-    let links = links_for(&c, &q);
+    let mut links = links_for(&c, &q);
+    links.parents = index.parents().map(str::to_string).collect();
     let hits = index.search(&q, &links);
     for hash in &hits {
         let Some(e) = c.get(hash) else { continue };
@@ -156,7 +158,7 @@ fn cmd_search(dir: &Path, query: &str) -> Res {
 fn links_for(c: &Collection, q: &Query) -> Links {
     let mut links = Links::default();
     if q.terms.iter().any(|t| matches!(t.kind, boorucraft_core::TermKind::Dupes(_))) {
-        links.dupes = find_groups(&[Some(c)], boorucraft_dedup::DEFAULT_THRESHOLD, |_, _| false).into_iter().flatten().map(|(_, h)| h).collect();
+        links.dupes = find_groups(&[Some(c)], boorucraft_dedup::DEFAULT_THRESHOLD).into_iter().flatten().map(|(_, h)| h).collect();
     }
     links
 }
@@ -199,7 +201,7 @@ fn cmd_dupes(rest: &[&str]) -> Res {
         colls.push(c);
     }
     let refs: Vec<Option<&Collection>> = colls.iter().map(Some).collect();
-    let groups = find_groups(&refs, threshold, |_, _| false);
+    let groups = find_groups(&refs, threshold);
     for (n, g) in groups.iter().enumerate() {
         println!("group {} ({} files)", n + 1, g.len());
         for (ci, hash) in g {
@@ -264,6 +266,15 @@ fn cmd_info(dir: &Path, file: Option<&Path>) -> Res {
     }
     let tag_names: Vec<String> = e.tags.iter().map(|t| if tags.contains(t) { t.clone() } else { format!("{t} (unknown)") }).collect();
     println!("tags:     {}", tag_names.join(" "));
+    if let Some(p) = &e.parent {
+        let shown = c.get(p).and_then(|pe| pe.paths.first().cloned()).map_or_else(|| p.clone(), |path| format!("{path} ({p})"));
+        println!("parent:   {shown}");
+    }
+    let children: Vec<&str> =
+        c.files().filter(|(_, x)| x.parent.as_deref() == Some(hash.as_str())).filter_map(|(_, x)| x.paths.first().map(String::as_str)).collect();
+    if !children.is_empty() {
+        println!("children: {}", children.join(", "));
+    }
     if e.missing {
         println!("missing:  yes");
     }
@@ -275,6 +286,7 @@ fn cmd_tag(dir: &Path, file: &Path, rest: &[&str]) -> Res {
     let mut remove = Vec::new();
     let mut rating: Option<Option<Rating>> = None;
     let mut source: Option<Option<String>> = None;
+    let mut parent: Option<Option<&str>> = None;
     let mut create = false;
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
@@ -283,6 +295,10 @@ fn cmd_tag(dir: &Path, file: &Path, rest: &[&str]) -> Res {
             "--rating" => {
                 let v = it.next().ok_or("--rating needs s, q, e or none")?;
                 rating = Some(if *v == "none" { None } else { Some(Rating::parse(v).ok_or_else(|| format!("unknown rating `{v}`"))?) });
+            }
+            "--parent" => {
+                let v = it.next().ok_or("--parent needs a file or none")?;
+                parent = Some(if *v == "none" { None } else { Some(v) });
             }
             "--source" => {
                 let v = it.next().ok_or("--source needs a URL or none")?;
@@ -317,7 +333,21 @@ fn cmd_tag(dir: &Path, file: &Path, rest: &[&str]) -> Res {
 
     let (mut c, mut cache) = open_collection(dir, true, &tags)?;
     let hash = find_file(&c, file)?;
+    let parent_hash = match parent {
+        Some(Some(p)) => {
+            let ph = find_file(&c, Path::new(p))?;
+            if ph == hash || ancestors(&c, &ph).contains(&hash) {
+                return Err("a file can't be its own parent or ancestor".into());
+            }
+            Some(Some(ph))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
     c.edit_tags(&hash, &add, &remove, &tags).map_err(err)?;
+    if let (Some(p), Some(e)) = (parent_hash, c.get_mut(&hash)) {
+        e.parent = p;
+    }
     if let Some(e) = c.get_mut(&hash) {
         if let Some(r) = rating {
             e.rating = r;
@@ -336,6 +366,20 @@ fn cmd_tag(dir: &Path, file: &Path, rest: &[&str]) -> Res {
     let e = c.get(&hash).ok_or("file vanished")?;
     println!("{}: {}", file.display(), e.tags.iter().cloned().collect::<Vec<_>>().join(" "));
     Ok(())
+}
+
+/// Parent, grandparent… of a file (stops at 100 or at a loop).
+fn ancestors(c: &Collection, hash: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut at = c.get(hash).and_then(|e| e.parent.clone());
+    while let Some(h) = at {
+        if out.len() >= 100 || out.contains(&h) {
+            break;
+        }
+        at = c.get(&h).and_then(|e| e.parent.clone());
+        out.push(h);
+    }
+    out
 }
 
 fn cmd_unknown(dir: &Path) -> Res {

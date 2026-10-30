@@ -210,16 +210,15 @@ fn duplicate_groups_span_collections() {
     add(&mut one, "nohash", 100, None);
     add(&mut two, "dd", 200, h(3, 0));
     add(&mut two, "ee", 100, h(u64::MAX, u64::MAX - 1));
-    let none = |_: &(usize, String), _: &(usize, String)| false;
-    let groups = find_groups(&[Some(&one), None, Some(&two)], 8, none);
+    let groups = find_groups(&[Some(&one), None, Some(&two)], 8);
     let m = |c: usize, h: &str| (c, h.to_string());
     assert_eq!(groups, vec![vec![m(0, "bb"), m(2, "dd"), m(0, "aa")], vec![m(0, "cc"), m(2, "ee")]], "the biggest picture first");
 
     two.mark_not_duplicate("ee", "cc");
     one.get_mut("aa").unwrap().missing = true;
-    let groups = find_groups(&[Some(&one), None, Some(&two)], 8, none);
+    let groups = find_groups(&[Some(&one), None, Some(&two)], 8);
     assert_eq!(groups, vec![vec![m(0, "bb"), m(2, "dd")]], "missing files and decided pairs are left out");
-    let related = |a: &(usize, String), b: &(usize, String)| a.1 == "bb" || b.1 == "bb";
-    assert!(find_groups(&[Some(&one), None, Some(&two)], 8, related).is_empty());
+    two.get_mut("dd").unwrap().parent = Some("bb".into());
+    assert!(find_groups(&[Some(&one), None, Some(&two)], 8).is_empty(), "a parent and its child aren't duplicates");
     assert!(needing_hashes(&one).is_empty(), "files that aren't on disk can't be hashed");
 }

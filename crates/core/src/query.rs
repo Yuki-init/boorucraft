@@ -165,6 +165,17 @@ impl TextMatch {
     }
 }
 
+/// What `parent:` matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentMatch {
+    /// `parent:none`: files without a parent.
+    None,
+    /// `parent:any`: files with a parent.
+    Any,
+    /// `parent:3fa9`: the file whose SHA-256 starts with this, and its children.
+    Of(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TermKind {
     Tag(TagPattern),
@@ -187,6 +198,9 @@ pub enum TermKind {
     Hash(String),
     /// `None`: the file has no source.
     Source(Option<TextMatch>),
+    Parent(ParentMatch),
+    /// Has (or hasn't) children.
+    Child(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +428,17 @@ fn parse_metatag(name: &str, value: &str) -> Result<TermKind, String> {
         "path" => Ok(TermKind::Path(text_match(&lower))),
         "source" if lower == "none" => Ok(TermKind::Source(None)),
         "source" => Ok(TermKind::Source(Some(text_match(&lower)))),
+        "parent" => Ok(TermKind::Parent(match lower.as_str() {
+            "none" => ParentMatch::None,
+            "any" => ParentMatch::Any,
+            h if (4..=64).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit()) => ParentMatch::Of(h.to_string()),
+            _ => return Err(bad(name)),
+        })),
+        "child" => Ok(TermKind::Child(match lower.as_str() {
+            "any" => true,
+            "none" => false,
+            v => parse_bool(v).ok_or_else(|| bad(name))?,
+        })),
         "md5" => {
             if lower.len() == 32 && lower.bytes().all(|b| b.is_ascii_hexdigit()) {
                 Ok(TermKind::Md5(lower))
@@ -458,6 +483,8 @@ pub const METATAG_HELP: &[(&str, &str)] = &[
     ("path", "path:\"holiday 2023\""),
     ("missing", "missing:yes"),
     ("dupes", "dupes:yes"),
+    ("parent", "parent:3fa9 (it and its children) or parent:none"),
+    ("child", "child:yes (has children)"),
     ("source", "source:none or source:*pixiv*"),
     ("md5", "md5:<32 hex digits>"),
     ("hash", "hash:3fa9"),
@@ -469,7 +496,8 @@ pub fn metatag_values(name: &str) -> &'static [&'static str] {
     match name {
         "rating" => &["s", "q", "e", "s,q", "q,e"],
         "kind" => &["image", "video", "other"],
-        "animated" | "missing" | "dupes" => &["yes", "no"],
+        "animated" | "missing" | "dupes" | "child" => &["yes", "no"],
+        "parent" => &["any", "none"],
         "type" => &["jpeg", "png", "gif", "webp", "jxl", "avif", "heic", "mp4", "webm", "mkv"],
         "ratio" => &["16:9", "4:3", "3:2", "1:1", "9:16", ">1", "<1"],
         "tagcount" => &["0", ">10"],
@@ -770,6 +798,10 @@ mod tests {
         assert_eq!(one("animated:yes"), TermKind::Animated(true));
         assert_eq!(one("missing:no"), TermKind::Missing(false));
         assert_eq!(one("dupes:yes"), TermKind::Dupes(true));
+        assert_eq!(one("parent:none"), TermKind::Parent(ParentMatch::None));
+        assert_eq!(one("parent:3FA9"), TermKind::Parent(ParentMatch::Of("3fa9".into())));
+        assert_eq!(one("child:any"), TermKind::Child(true));
+        assert!(Query::parse("parent:xyz").is_err() && Query::parse("child:maybe").is_err());
         assert_eq!(one("path:\"Holiday 2023\""), TermKind::Path(TextMatch::Contains("holiday 2023".into())));
         assert_eq!(one("path:*/2023/*"), TermKind::Path(TextMatch::Glob("*/2023/*".into())));
         assert_eq!(one("source:none"), TermKind::Source(None));

@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use boorucraft_core::{DateField, Mode, NumField, Order, OrderKey, Query, Rating, TagPattern, TermKind, glob_match};
+use boorucraft_core::{DateField, Mode, NumField, Order, OrderKey, ParentMatch, Query, Rating, TagPattern, TermKind, glob_match};
 use chrono::{DateTime, Utc};
 use roaring::RoaringBitmap;
 
@@ -19,6 +19,8 @@ use crate::{Collection, FileEntry, Kind};
 pub struct Links {
     /// Hashes of files that have a near-duplicate.
     pub dupes: HashSet<String>,
+    /// Hashes of files that are some file's parent.
+    pub parents: HashSet<String>,
 }
 
 /// The searchable and sortable columns of one file.
@@ -42,6 +44,7 @@ pub struct Row {
     /// Lowercase relative paths.
     paths: Vec<String>,
     source: Option<String>,
+    parent: Option<String>,
 }
 
 impl Row {
@@ -64,6 +67,7 @@ impl Row {
             name,
             paths,
             source: e.source.as_ref().map(|s| s.to_lowercase()),
+            parent: e.parent.as_ref().map(|p| p.to_lowercase()),
         }
     }
 
@@ -107,6 +111,10 @@ impl Row {
             TermKind::Animated(want) => self.animated == *want,
             TermKind::Missing(want) => self.missing == *want,
             TermKind::Dupes(want) => links.dupes.contains(&self.hash) == *want,
+            TermKind::Parent(ParentMatch::None) => self.parent.is_none(),
+            TermKind::Parent(ParentMatch::Any) => self.parent.is_some(),
+            TermKind::Parent(ParentMatch::Of(p)) => self.hash.starts_with(p.as_str()) || self.parent.as_deref().is_some_and(|x| x.starts_with(p.as_str())),
+            TermKind::Child(want) => links.parents.contains(&self.hash) == *want,
             TermKind::Path(m) => self.paths.iter().any(|p| m.matches(p)),
             TermKind::Md5(m) => self.md5 == *m,
             TermKind::Hash(prefix) => self.hash.starts_with(prefix.as_str()),
@@ -196,6 +204,11 @@ impl SearchIndex {
     /// How many files have `tag`.
     pub fn count(&self, tag: &str) -> u64 {
         self.tags.get(tag).map_or(0, RoaringBitmap::len)
+    }
+
+    /// Hashes named as a parent by files of this collection.
+    pub fn parents(&self) -> impl Iterator<Item = &str> {
+        self.rows.iter().filter_map(|r| r.parent.as_deref())
     }
 
     /// Every tag in use with its file count, most used first.
@@ -342,6 +355,9 @@ mod tests {
             if f.hash == "a1a1" {
                 e.source = Some("https://www.pixiv.net/artworks/1".into());
             }
+            if f.hash == "b2b2" {
+                e.parent = Some("a1a1".into());
+            }
             e.paths.insert(f.path.into());
             c.insert(f.hash.into(), e);
         }
@@ -349,7 +365,7 @@ mod tests {
     }
 
     fn search<'a>(i: &'a SearchIndex, q: &str) -> Vec<&'a str> {
-        let links = Links { dupes: ["a1a1".to_string(), "c3c3".to_string()].into() };
+        let links = Links { dupes: ["a1a1".to_string(), "c3c3".to_string()].into(), parents: ["a1a1".to_string()].into() };
         i.search_at(&Query::parse(q).unwrap(), day(200), &links)
     }
 
@@ -405,6 +421,10 @@ mod tests {
         assert_eq!(search(&i, "~kind:video ~animated:yes"), vec!["d4d4", "c3c3"]);
         assert_eq!(search(&i, "dupes:yes"), vec!["c3c3", "a1a1"]);
         assert_eq!(search(&i, "dupes:no"), vec!["e5e5", "d4d4", "b2b2"]);
+        assert_eq!(search(&i, "parent:a1a1"), vec!["b2b2", "a1a1"], "the parent and its children");
+        assert_eq!(search(&i, "parent:any"), vec!["b2b2"]);
+        assert_eq!(search(&i, "child:yes"), vec!["a1a1"]);
+        assert_eq!(search(&i, "~parent:any ~child:yes"), vec!["b2b2", "a1a1"], "the whole family");
     }
 
     #[test]

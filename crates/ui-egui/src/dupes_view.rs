@@ -23,6 +23,7 @@ enum Action {
     Trash(Hit, Vec<Hit>),
     Merge(Hit, Vec<Hit>),
     NotDupes(Vec<Hit>),
+    Variants(Hit, Vec<Hit>),
     Show(Vec<Hit>),
     Open(Hit),
 }
@@ -98,6 +99,13 @@ impl App {
                         if ui.button("Not duplicates").on_hover_text("Never group these again (saved in collection.json)").clicked() {
                             action = Some(Action::NotDupes(group.clone()));
                         }
+                        if ui
+                            .button("Make variants")
+                            .on_hover_text("Keep them all, linked as versions of this one (parent and children); they leave this list")
+                            .clicked()
+                        {
+                            action = Some(Action::Variants(keep.clone(), others.clone()));
+                        }
                         if ui.button("Show in grid").clicked() {
                             action = Some(Action::Show(group.clone()));
                         }
@@ -124,6 +132,9 @@ impl App {
                 }
             }
             Some(Action::NotDupes(group)) => self.lib.mark_not_duplicates(&group),
+            Some(Action::Variants(keep, others)) => {
+                self.lib.set_parent(&others, Some(&keep));
+            }
             Some(Action::Show(group)) => {
                 self.query = group.iter().map(|h| format!("~hash:{}", h.hash.get(..16).unwrap_or(&h.hash))).collect::<Vec<_>>().join(" ");
                 self.screen = Screen::Grid;

@@ -475,7 +475,7 @@ impl Library {
         self.dupes_stale = false;
         let colls: Vec<Option<&Collection>> = self.colls.iter().map(OpenCollection::collection).collect();
         let threshold = self.dupe_threshold();
-        let groups = find_groups(&colls, threshold, |_, _| false);
+        let groups = find_groups(&colls, threshold);
         self.links.dupes = groups.iter().flatten().map(|(_, h)| h.clone()).collect();
         self.dupe_groups = groups.into_iter().map(|g| g.into_iter().map(|(coll, hash)| Hit { coll, hash }).collect()).collect();
     }
@@ -532,6 +532,7 @@ impl Library {
         };
         query.seed = self.seed;
         self.refresh_dupes();
+        self.links.parents = self.colls.iter().flat_map(|oc| oc.index.parents()).map(str::to_string).collect();
         let now = chrono::Utc::now();
         let mut rows: Vec<(usize, &Row)> = Vec::new();
         for (i, oc) in self.colls.iter().enumerate() {
@@ -714,9 +715,66 @@ impl Library {
         self.dupes_stale = true;
     }
 
+    /// A file by hash in any open collection.
+    pub fn find(&self, hash: &str) -> Option<(usize, &FileEntry)> {
+        self.colls.iter().enumerate().find_map(|(i, oc)| oc.collection()?.get(hash).map(|e| (i, e)))
+    }
+
+    /// Hashes of a file's parent, grandparent… (stops at 100 or at a loop).
+    pub fn ancestors(&self, hash: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut at = self.find(hash).and_then(|(_, e)| e.parent.clone());
+        while let Some(h) = at {
+            if out.len() >= 100 || out.contains(&h) {
+                break;
+            }
+            at = self.find(&h).and_then(|(_, e)| e.parent.clone());
+            out.push(h);
+        }
+        out
+    }
+
+    /// Children of a file in the open collections.
+    pub fn children(&self, hash: &str) -> Vec<Hit> {
+        let mut out = Vec::new();
+        for (coll, oc) in self.colls.iter().enumerate() {
+            let Some(c) = oc.collection() else { continue };
+            out.extend(c.files().filter(|(_, e)| e.parent.as_deref() == Some(hash)).map(|(h, _)| Hit { coll, hash: h.to_string() }));
+        }
+        out
+    }
+
+    /// Links `children` as versions of `parent` (`None` unlinks them). Refuses a link that would
+    /// make a loop. Returns how many files changed.
+    pub fn set_parent(&mut self, children: &[Hit], parent: Option<&Hit>) -> usize {
+        let parent_hash = parent.map(|p| p.hash.clone());
+        if let Some(p) = &parent_hash {
+            let above = self.ancestors(p);
+            if children.iter().any(|c| c.hash == *p || above.contains(&c.hash)) {
+                self.notify("A file can't be the parent of itself or of its own parent");
+                return 0;
+            }
+        }
+        let mut changed = 0;
+        self.edit_entries(children, |e| {
+            let differs = e.parent != parent_hash;
+            e.parent = parent_hash.clone();
+            changed += usize::from(differs);
+            differs
+        });
+        self.dupes_stale = true;
+        changed
+    }
+
     /// Copies the tags of `others` to `keep`; also their source and rating if `keep` has none
-    /// (the strictest rating wins). Returns whether `keep` changed.
+    /// (the strictest rating wins). Children of the others become children of `keep`. Returns
+    /// whether anything changed.
     pub fn merge_into(&mut self, keep: &Hit, others: &[Hit]) -> bool {
+        let mut moved = 0;
+        for other in others.iter().filter(|h| h.hash != keep.hash) {
+            let kids: Vec<Hit> = self.children(&other.hash).into_iter().filter(|k| k.hash != keep.hash).collect();
+            moved += self.set_parent(&kids, Some(keep));
+        }
         let mut tags = BTreeSet::new();
         let mut rating: Option<Rating> = None;
         let mut source = None;
@@ -738,7 +796,7 @@ impl Library {
             changed = *e != before;
             changed
         });
-        changed
+        changed || moved > 0
     }
 
     /// Moves files (every copy, and each one's sidecar) to the trash and forgets them. A file
@@ -792,6 +850,12 @@ impl Library {
                 }
             }
             touched.insert(hit.coll);
+        }
+        // Children of removed files lose their parent link rather than point at nothing.
+        let removed_hashes: HashSet<&str> = hits.iter().filter(|h| self.find(&h.hash).is_none()).map(|h| h.hash.as_str()).collect();
+        let orphans: Vec<Hit> = removed_hashes.iter().flat_map(|h| self.children(h)).collect();
+        if !orphans.is_empty() {
+            self.set_parent(&orphans, None);
         }
         for coll in touched {
             if let Some(oc) = self.colls.get_mut(coll)
@@ -1001,6 +1065,31 @@ mod tests {
         assert!(!pics.join(&trashed_name).exists() && bin.join(&trashed_name).exists(), "moved to the trash");
         assert!(bin.join(format!("{trashed_name}.xmp")).exists(), "with its sidecar");
         assert!(lib.entry(&group[1]).is_none());
+
+        // Versions linked as parent and child aren't duplicates.
+        let kept = group[0].clone();
+        detailed(&pics.join("again.png"), 400, 0.3);
+        lib.start_scan(0);
+        let t0 = Instant::now();
+        while lib.is_busy() {
+            assert!(t0.elapsed() < Duration::from_secs(20), "rescan never finished");
+            std::thread::sleep(Duration::from_millis(5));
+            lib.poll();
+        }
+        lib.refresh_dupes();
+        let again = first(&lib, "big.png");
+        assert_eq!(again.len(), 2, "the new copy groups with the kept one");
+        assert_eq!(lib.set_parent(&again[1..], Some(&kept)), 1);
+        assert_eq!(lib.set_parent(std::slice::from_ref(&kept), Some(&again[1])), 0, "no loops");
+        lib.refresh_dupes();
+        assert_eq!(lib.dupe_groups.len(), 1, "only the other pair is left");
+        lib.search(&format!("parent:{}", &kept.hash[..8]));
+        assert_eq!(lib.hits.len(), 2);
+        lib.search("child:yes");
+        assert_eq!(lib.hits, vec![kept.clone()]);
+        // Trashing the parent unlinks its child.
+        assert_eq!(lib.trash_files(std::slice::from_ref(&kept)), 1);
+        assert_eq!(lib.entry(&again[1]).unwrap().parent, None);
 
         // The other pair: not duplicates, and that is remembered.
         let other = first(&lib, "x.png");

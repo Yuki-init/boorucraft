@@ -9,8 +9,8 @@ pub mod rating;
 pub mod tag;
 
 pub use query::{
-    Cmp, DateField, DateSpec, DateValue, METATAG_HELP, Mode, NumField, NumRange, Order, OrderKey, Query, QueryError, TagPattern, Term, TermKind, TextMatch,
-    metatag_values, normalize_format,
+    Cmp, DateField, DateSpec, DateValue, METATAG_HELP, Mode, NumField, NumRange, Order, OrderKey, ParentMatch, Query, QueryError, TagPattern, Term, TermKind,
+    TextMatch, metatag_values, normalize_format,
 };
 pub use rating::Rating;
 pub use tag::{TagError, glob_match, is_valid_namespace, normalize_tag, split_namespace};
@@ -19,5 +19,5 @@ pub use tag::{TagError, glob_match, is_valid_namespace, normalize_tag, split_nam
 /// tag namespaces, so a query term's meaning never depends on the tag list.
 pub const METATAGS: &[&str] = &[
     "rating", "width", "height", "ratio", "mpixels", "filesize", "type", "kind", "animated", "date", "imported", "tagcount", "path", "dupes", "missing",
-    "order", "md5", "hash", "source",
+    "order", "md5", "hash", "source", "parent", "child",
 ];

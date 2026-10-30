@@ -508,7 +508,72 @@ impl App {
                 ui.separator();
                 self.source_row(ui, &targets[0]);
             }
+            ui.separator();
+            self.family_section(ui, &targets);
         });
+    }
+
+    /// Parent and children: show the family, unlink, or link a selection as versions.
+    fn family_section(&mut self, ui: &mut egui::Ui, targets: &[Hit]) {
+        ui.label(RichText::new("Versions").strong()).on_hover_text("Link edits, crops and alternates of a picture to it (parent and children)");
+        let file_name = |lib: &Library, hash: &str| -> String {
+            lib.find(hash)
+                .and_then(|(_, e)| e.paths.first().map(|p| p.rsplit('/').next().unwrap_or(p).to_string()))
+                .unwrap_or_else(|| format!("{}… (not open)", hash.get(..12).unwrap_or(hash)))
+        };
+        let mut show: Option<String> = None;
+        let mut unlink: Option<Vec<Hit>> = None;
+        let mut link: Option<(Hit, Vec<Hit>)> = None;
+        if let [hit] = targets {
+            let parent = self.lib.entry(hit).and_then(|e| e.parent.clone());
+            let kids = self.lib.children(&hit.hash);
+            if let Some(p) = &parent {
+                ui.horizontal(|ui| {
+                    ui.label("Parent:");
+                    if ui.link(file_name(&self.lib, p)).on_hover_text("Show the family").clicked() {
+                        show = Some(p.clone());
+                    }
+                    if ui.small_button("Unlink").on_hover_text("This file is no longer a version of it").clicked() {
+                        unlink = Some(vec![hit.clone()]);
+                    }
+                });
+            }
+            if !kids.is_empty() {
+                let text = format!("{} version{} of this file", kids.len(), if kids.len() == 1 { "" } else { "s" });
+                if ui.link(text).on_hover_text("Show the family").clicked() {
+                    show = Some(hit.hash.clone());
+                }
+            }
+            if parent.is_none() && kids.is_empty() {
+                ui.label(RichText::new("Select it with other files to link them as versions.").small().color(Color32::from_gray(150)));
+            }
+        } else {
+            let main = self.sel.cursor.and_then(|c| self.lib.hits.get(c)).filter(|h| targets.contains(h)).or(targets.first()).cloned();
+            if let Some(main) = main {
+                let others: Vec<Hit> = targets.iter().filter(|h| **h != main).cloned().collect();
+                let rest = if others.len() == 1 { "the other file".to_string() } else { format!("the other {} files", others.len()) };
+                let text = format!("Make “{}” the parent of {rest}", file_name(&self.lib, &main.hash));
+                if ui.button(text).on_hover_text("The file with the keyboard cursor becomes the parent").clicked() {
+                    link = Some((main, others));
+                }
+            }
+            if targets.iter().any(|h| self.lib.entry(h).is_some_and(|e| e.parent.is_some())) && ui.button("Unlink them from their parents").clicked() {
+                unlink = Some(targets.to_vec());
+            }
+        }
+        if let Some(hash) = show {
+            self.query = format!("parent:{}", hash.get(..16).unwrap_or(&hash));
+            self.viewer = None;
+        }
+        if let Some(hits) = unlink {
+            self.lib.set_parent(&hits, None);
+        }
+        if let Some((main, others)) = link {
+            let n = self.lib.set_parent(&others, Some(&main));
+            if n > 0 {
+                self.lib.notify(format!("Linked {n} file{} as versions", if n == 1 { "" } else { "s" }));
+            }
+        }
     }
 
     fn file_info(&self, ui: &mut egui::Ui, targets: &[Hit]) {
