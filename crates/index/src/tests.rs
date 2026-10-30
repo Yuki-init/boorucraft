@@ -273,3 +273,37 @@ fn watch_events_are_classified() {
     assert_eq!(is("gone-empty-folder"), Relevance::Ignore);
     assert_eq!(classify(&c, &cache, &root), Relevance::Rescan, "the root itself (e.g. an overflow)");
 }
+
+/// Regression: with collection.json lost, a scan using the old scan cache skipped the sidecars
+/// (their times matched the cache), so every tag was silently gone.
+#[test]
+fn a_lost_collection_is_rebuilt_from_its_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "a.png", &png(10, 20));
+    write(root, "sub/b.png", &png(11, 20));
+    let tags = tag_list();
+    let mut cache = ScanCache::in_memory();
+    let mut c = Collection::open(root).unwrap();
+    scan(&mut c, &tags, &mut cache);
+    let (a, b) = (hash_at(&c, "a.png"), hash_at(&c, "sub/b.png"));
+    c.edit_tags(&a, &["cat", "artist:foo"], &[], &tags).unwrap();
+    c.get_mut(&a).unwrap().rating = Some(boorucraft_core::Rating::Questionable);
+    c.get_mut(&a).unwrap().source = Some("https://example.org/1".into());
+    c.edit_tags(&b, &["sky"], &[], &tags).unwrap();
+    let mut report = Default::default();
+    write_sidecars(&c, &tags, [a.as_str(), b.as_str()], &mut cache, &mut report);
+    c.save().unwrap();
+    drop(c);
+
+    fs::remove_file(root.join("collection.json")).unwrap();
+    let mut c = Collection::open(root).unwrap();
+    let r = scan(&mut c, &tags, &mut cache);
+    assert_eq!(r.added, 2);
+    assert_eq!(r.sidecars.read, 2, "{:?}", r.sidecars.errors);
+    let e = c.get(&a).unwrap();
+    assert_eq!(e.tags, ["artist:foo".to_string(), "cat".to_string()].into());
+    assert_eq!(e.rating, Some(boorucraft_core::Rating::Questionable));
+    assert_eq!(e.source.as_deref(), Some("https://example.org/1"));
+    assert!(c.get(&b).unwrap().tags.contains("sky"));
+}

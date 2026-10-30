@@ -103,9 +103,11 @@ pub fn missing_sidecars(c: &Collection) -> Vec<String> {
         .collect()
 }
 
-/// Reads sidecars changed by other apps since BooruCraft last wrote or read them. Returns the
-/// files whose data changed.
-pub fn read_back(c: &mut Collection, tags: &TagList, cache: &mut ScanCache, report: &mut SidecarReport) -> BTreeSet<String> {
+/// Reads sidecars changed by other apps since BooruCraft last wrote or read them, and every
+/// sidecar of the files in `fresh` (just added to the collection: after collection.json was
+/// lost, or moved in from elsewhere) whatever the cache says. Returns the files whose data
+/// changed.
+pub fn read_back(c: &mut Collection, tags: &TagList, cache: &mut ScanCache, fresh: &BTreeSet<String>, report: &mut SidecarReport) -> BTreeSet<String> {
     let mut changed = BTreeSet::new();
     let mode = c.settings().sidecars;
     if !c.settings().read_back_sidecars || mode == SidecarMode::Off {
@@ -120,7 +122,7 @@ pub fn read_back(c: &mut Collection, tags: &TagList, cache: &mut ScanCache, repo
     for (hash, srel, abs) in candidates {
         let Ok(meta) = std::fs::metadata(&abs) else { continue };
         let mtime = mtime_ns(&meta);
-        if cache.sidecar_mtime(&srel) == Some(mtime) {
+        if cache.sidecar_mtime(&srel) == Some(mtime) && !fresh.contains(&hash) {
             continue;
         }
         let bytes = match safefile::read_capped(&abs, MAX_SIDECAR_BYTES as u64) {

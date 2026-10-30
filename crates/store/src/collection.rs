@@ -165,6 +165,26 @@ impl Default for CollectionFile {
     }
 }
 
+/// Where [`Collection::open_recovering`] starts from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    /// collection.json.bak.
+    Backup,
+    /// Nothing: the next scan reads everything back from the sidecars.
+    Empty,
+}
+
+fn parse(bytes: &[u8], path: &Path) -> Result<CollectionFile> {
+    let data: CollectionFile = serde_json::from_slice(bytes).map_err(|source| StoreError::Json { path: path.to_path_buf(), source })?;
+    if data.format != FORMAT {
+        return Err(StoreError::WrongFormat { path: path.to_path_buf(), expected: "BooruCraft collection" });
+    }
+    if data.version > VERSION {
+        return Err(StoreError::NewerVersion { path: path.to_path_buf(), version: data.version });
+    }
+    Ok(data)
+}
+
 #[derive(Debug)]
 pub struct Collection {
     root: PathBuf,
@@ -203,15 +223,50 @@ impl Collection {
         let Some(bytes) = safefile::read_capped(&json, MAX_BYTES)? else {
             return Ok(Collection { root, json, data: CollectionFile::default(), stamp: None, meta: None, lock: None, dirty: true });
         };
-        let data: CollectionFile = serde_json::from_slice(&bytes).map_err(|source| StoreError::Json { path: json.clone(), source })?;
-        if data.format != FORMAT {
-            return Err(StoreError::WrongFormat { path: json, expected: "BooruCraft collection" });
-        }
-        if data.version > VERSION {
-            return Err(StoreError::NewerVersion { path: json, version: data.version });
-        }
+        let data = parse(&bytes, &json)?;
         let meta = Meta::of(&json);
         Ok(Collection { root, json, data, stamp: Some(Stamp::of(&bytes)), meta, lock: None, dirty: false })
+    }
+
+    /// Opens a collection whose collection.json can't be read (it doesn't parse), starting from
+    /// its `.bak` ([`Recovery::Backup`]) or from nothing ([`Recovery::Empty`]; a scan then
+    /// rebuilds tags, ratings and sources from the sidecars). The damaged file is left alone
+    /// until the first save, which moves it to collection.json.bak; later saves replace that, so
+    /// keep a copy first with [`Collection::copy_damaged`].
+    pub fn open_recovering(root: &Path, from: Recovery) -> Result<Collection> {
+        let root = root.canonicalize().map_err(|e| StoreError::io(root, e))?;
+        let json = root.join(COLLECTION_FILE);
+        let lock = Lock::acquire(&json)?;
+        let data = match from {
+            Recovery::Backup => {
+                let bak = safefile::sibling(&json, ".bak");
+                let bytes = safefile::read_capped(&bak, MAX_BYTES)?.ok_or_else(|| StoreError::Invalid(format!("{} doesn't exist", bak.display())))?;
+                parse(&bytes, &bak)?
+            }
+            Recovery::Empty => CollectionFile::default(),
+        };
+        // What is on disk now, so the first save may replace it.
+        let stamp = safefile::read_capped(&json, MAX_BYTES)?.map(|b| Stamp::of(&b));
+        let meta = Meta::of(&json);
+        Ok(Collection { root, json, data, stamp, meta, lock: Some(lock), dirty: true })
+    }
+
+    /// Copies the collection.json in `root` to `dir` (outside the collection, e.g. the app's
+    /// config folder) as `<folder name>-<time>.json`, before recovering it. Returns the copy.
+    pub fn copy_damaged(root: &Path, dir: &Path) -> Result<PathBuf> {
+        let json = root.join(COLLECTION_FILE);
+        let name = root.file_name().map_or_else(|| "collection".to_string(), |n| n.to_string_lossy().into_owned());
+        let stamp = Utc::now().format("%Y%m%d-%H%M%S");
+        let to = dir.join(format!("{name}-{stamp}.json"));
+        std::fs::create_dir_all(dir).map_err(|e| StoreError::io(dir, e))?;
+        std::fs::copy(&json, &to).map_err(|e| StoreError::io(&json, e))?;
+        Ok(to)
+    }
+
+    /// Does `root` have a collection.json.bak that can be loaded?
+    pub fn backup_is_readable(root: &Path) -> bool {
+        let bak = safefile::sibling(&root.join(COLLECTION_FILE), ".bak");
+        safefile::read_capped(&bak, MAX_BYTES).ok().flatten().is_some_and(|b| parse(&b, &bak).is_ok())
     }
 
     pub fn root(&self) -> &Path {
@@ -521,6 +576,39 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(COLLECTION_FILE)).unwrap();
         assert!(text.contains("\"format\": \"boorucraft-collection\""), "{text}");
         assert!(!text.contains("missing"), "false flags are left out");
+    }
+
+    #[test]
+    fn a_damaged_file_is_recovered_without_losing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Collection::open(dir.path()).unwrap();
+        c.insert("aa".into(), entry("cat.png", &["cat"]));
+        c.save().unwrap();
+        c.insert("bb".into(), entry("dog.png", &["dog"]));
+        c.save().unwrap();
+        drop(c);
+        let json = dir.path().join(COLLECTION_FILE);
+        let bak = dir.path().join("collection.json.bak");
+        std::fs::write(&json, "{ damaged").unwrap();
+        assert!(matches!(Collection::open(dir.path()), Err(StoreError::Json { .. })));
+        assert!(Collection::backup_is_readable(dir.path()));
+
+        let mut c = Collection::open_recovering(dir.path(), Recovery::Backup).unwrap();
+        assert!(c.get("aa").is_some() && c.get("bb").is_none(), "the backup is one save behind");
+        assert_eq!(std::fs::read_to_string(&json).unwrap(), "{ damaged", "untouched until saved");
+        c.save().unwrap();
+        assert!(std::fs::read_to_string(&json).unwrap().contains("cat.png"));
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{ damaged", "the damaged file is kept");
+        drop(c);
+
+        // No usable backup: start empty (a scan rebuilds from sidecars).
+        std::fs::write(&json, "{ damaged again").unwrap();
+        assert!(!Collection::backup_is_readable(dir.path()));
+        assert!(Collection::open_recovering(dir.path(), Recovery::Backup).is_err());
+        let mut c = Collection::open_recovering(dir.path(), Recovery::Empty).unwrap();
+        assert!(c.is_empty() && !c.is_read_only());
+        c.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{ damaged again");
     }
 
     #[test]

@@ -435,6 +435,7 @@ impl App {
         let mut close = None;
         let mut settle = None;
         let mut show_missing = false;
+        let mut recover = None;
         if self.lib.tags_outside_change {
             settle = outside_change_box(ui, "The tag list (tags.json)", Outside::TagList).or(settle);
         }
@@ -479,6 +480,25 @@ impl App {
                 if oc.outside_change {
                     settle = outside_change_box(ui, "collection.json", Outside::Collection(i)).or(settle);
                 }
+                if let Some(backup) = oc.damaged {
+                    ui.label(
+                        RichText::new("collection.json is damaged. Either way, a copy of it is kept in BooruCraft's settings folder.")
+                            .small()
+                            .color(Color32::from_gray(190)),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if backup && ui.small_button("Load the backup").on_hover_text("collection.json.bak: the version before the last save").clicked() {
+                            recover = Some((i, boorucraft_store::Recovery::Backup));
+                        }
+                        if ui
+                            .small_button("Rebuild from sidecars")
+                            .on_hover_text("Tags, ratings and sources come back from the .xmp files; pools, versions and \"not duplicates\" choices don't")
+                            .clicked()
+                        {
+                            recover = Some((i, boorucraft_store::Recovery::Empty));
+                        }
+                    });
+                }
                 ui.horizontal(|ui| {
                     let ready = matches!(oc.state, CollState::Ready { .. });
                     if ui.add_enabled(ready && !oc.read_only(), egui::Button::new("Rescan").small()).clicked() {
@@ -493,6 +513,10 @@ impl App {
                     }
                 });
             });
+        }
+        if let Some((i, from)) = recover {
+            self.lib.recover_collection(i, from);
+            self.searched = None;
         }
         if show_missing {
             self.query = "missing:yes".into();

@@ -106,3 +106,8 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 - 2026-10-30 — M4.5: Unknown tags review: "Unknown (n)" tab on the Tags screen listing tags in
   the open collections that aren't in the tag list, from the usage counts already kept; add
   (one or all), use a listed tag instead (with suggestions), or remove from the files.
+- 2026-10-30 — M4.6: rebuild from sidecars. Fixed: with `collection.json` lost, a rescan
+  skipped every sidecar (the scan cache still knew them) and the tags were silently gone; files
+  new to a collection now always have their sidecars read. A damaged `collection.json` can be
+  recovered from its `.bak` or rebuilt from the sidecars (collection card, `boorucraft-cli
+  recover`); a copy of the damaged file is kept in the config folder first.

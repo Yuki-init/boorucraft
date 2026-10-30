@@ -22,6 +22,10 @@ const USAGE: &str = "usage:
   boorucraft-cli dupes DIR... [--threshold N] find near-duplicates (hashes missing pictures first;
                                              N is the most differing bits, default 6)
   boorucraft-cli unknown DIR                 tags used in DIR that aren't in the tag list
+  boorucraft-cli recover DIR --from-backup|--from-sidecars
+                                             reopen a collection whose collection.json is damaged,
+                                             from collection.json.bak or by reading the sidecars
+                                             (a copy of the damaged file goes to the config folder)
   boorucraft-cli forget-missing DIR [--yes]  list files missing since the last scan; with --yes,
                                              remove them and their tags (no file is touched)
   boorucraft-cli tags [PREFIX]               list tags (with descriptions)
@@ -93,6 +97,8 @@ fn run(args: &[String]) -> Res {
         ["info", dir, file] => cmd_info(Path::new(dir), Some(Path::new(file))),
         ["tag", dir, file, rest @ ..] if !rest.is_empty() => cmd_tag(Path::new(dir), Path::new(file), rest),
         ["unknown", dir] => cmd_unknown(Path::new(dir)),
+        ["recover", dir, "--from-backup"] => cmd_recover(Path::new(dir), boorucraft_store::Recovery::Backup),
+        ["recover", dir, "--from-sidecars"] => cmd_recover(Path::new(dir), boorucraft_store::Recovery::Empty),
         ["forget-missing", dir] => cmd_forget_missing(Path::new(dir), false),
         ["forget-missing", dir, "--yes"] => cmd_forget_missing(Path::new(dir), true),
         ["dupes", rest @ ..] if !rest.is_empty() => cmd_dupes(rest),
@@ -118,7 +124,13 @@ fn open_tags(write: bool) -> Res<TagList> {
 /// Opens a collection, catches it up with the tag list, and rewrites the sidecars of files
 /// whose tags that changed.
 fn open_collection(dir: &Path, write: bool, tags: &TagList) -> Res<(Collection, ScanCache)> {
-    let mut c = if write { Collection::open(dir) } else { Collection::open_read_only(dir) }.map_err(err)?;
+    let mut c = if write { Collection::open(dir) } else { Collection::open_read_only(dir) }.map_err(|e| match e {
+        StoreError::Json { .. } => {
+            let hint = if Collection::backup_is_readable(dir) { "--from-backup (or --from-sidecars)" } else { "--from-sidecars" };
+            format!("{e}\nIt can be recovered with `boorucraft-cli recover {} {hint}`", dir.display())
+        }
+        e => e.to_string(),
+    })?;
     let mut cache = ScanCache::load(&paths::cache_dir(), c.root());
     let changed = c.apply_tag_history(tags);
     if write && !changed.is_empty() {
@@ -439,6 +451,25 @@ fn cmd_unknown(dir: &Path) -> Res {
         let hint = if hint.is_empty() { String::new() } else { format!("  (similar: {})", hint.join(", ")) };
         out!("{n:>6}  {t}{hint}");
     }
+    Ok(())
+}
+
+fn cmd_recover(dir: &Path, from: boorucraft_store::Recovery) -> Res {
+    let tags = open_tags(false)?;
+    match Collection::open_read_only(dir) {
+        Err(StoreError::Json { .. }) => {}
+        Ok(_) => return Err("collection.json isn't damaged; nothing to recover".into()),
+        Err(e) => return Err(e.to_string()),
+    }
+    let copy = Collection::copy_damaged(dir, &paths::config_dir().join("damaged")).map_err(err)?;
+    err!("copied the damaged collection.json to {}", copy.display());
+    let mut c = Collection::open_recovering(dir, from).map_err(err)?;
+    c.apply_tag_history(&tags);
+    let mut cache = ScanCache::load(&paths::cache_dir(), c.root());
+    let r = scan(&mut c, &tags, &mut cache);
+    save(&mut c, &cache)?;
+    let tagged = c.files().filter(|(_, e)| !e.tags.is_empty()).count();
+    out!("recovered {} files ({tagged} tagged); {} sidecar(s) read", c.len(), r.sidecars.read);
     Ok(())
 }
 

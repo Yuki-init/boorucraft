@@ -158,6 +158,7 @@ pub fn scan(c: &mut Collection, tags: &TagList, cache: &mut ScanCache) -> ScanRe
     }
 
     report.added = new_entries.len();
+    let fresh: BTreeSet<String> = new_entries.keys().cloned().collect();
     for (hash, entry) in new_entries {
         c.insert(hash, entry);
     }
@@ -194,7 +195,7 @@ pub fn scan(c: &mut Collection, tags: &TagList, cache: &mut ScanCache) -> ScanRe
     cache.retain_files(|rel| hash_of.contains_key(rel));
 
     // Sidecars.
-    sidecar::read_back(c, tags, cache, &mut report.sidecars);
+    sidecar::read_back(c, tags, cache, &fresh, &mut report.sidecars);
     touched.extend(sidecar::missing_sidecars(c));
     sidecar::write_sidecars(c, tags, touched.iter().map(String::as_str), cache, &mut report.sidecars);
     report

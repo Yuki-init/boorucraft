@@ -123,6 +123,24 @@ fn info_and_unknown_tags() {
 }
 
 #[test]
+fn recover_a_damaged_collection() {
+    let e = Env::new();
+    let (dir, a) = (e.dir(), e.file("a.png"));
+    e.ok(&["scan", dir]);
+    e.ok(&["tag", dir, &a, "cat", "--create", "--rating", "q"]);
+    assert!(e.fails(&["recover", dir, "--from-sidecars"]).contains("isn't damaged"));
+    std::fs::write(e.pics.path().join("collection.json"), "{ damaged").unwrap();
+    std::fs::remove_file(e.pics.path().join("collection.json.bak")).unwrap();
+    let hint = e.fails(&["scan", dir]);
+    assert!(hint.contains("recover") && hint.contains("--from-sidecars") && !hint.contains("--from-backup"), "{hint}");
+    let out = e.ok(&["recover", dir, "--from-sidecars"]);
+    assert!(out.contains("recovered 2 files (1 tagged)"), "{out}");
+    assert_eq!(names(&e.ok(&["search", dir, "cat", "rating:q"])), vec!["a.png"]);
+    let kept = std::fs::read_dir(e.home.path().join("config/damaged")).unwrap().count();
+    assert_eq!(kept, 1);
+}
+
+#[test]
 fn forget_missing() {
     let e = Env::new();
     let (dir, a) = (e.dir(), e.file("a.png"));

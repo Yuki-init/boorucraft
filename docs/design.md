@@ -176,8 +176,11 @@ one collection or all open ones.
   it (sidecars of files whose tags changed are rewritten to match). Otherwise nothing is saved
   until the user picks "Keep mine" (their version goes to the `.bak`) or "Load theirs". A
   deleted file is written again. A file that can't be parsed is never loaded; the user is asked.
-- **Damaged file**: if it doesn't parse, the app offers to load `.bak` and never overwrites
-  the damaged file.
+- **Damaged file**: if it doesn't parse, the collection card offers "Load the backup" (when
+  `.bak` parses) and "Rebuild from sidecars" (`boorucraft-cli recover DIR
+  --from-backup|--from-sidecars`). Nothing is touched until the user picks one; then a copy of
+  the damaged file goes to `damaged/<folder>-<time>.json` in the config folder (outside the
+  collection) before anything is saved over it.
 
 Expected size: about 300–400 bytes per file, so 100k files ≈ 35 MB of JSON, loaded and indexed
 in well under a second. If saving ever becomes slow at very large sizes, the fallback is an
@@ -215,8 +218,10 @@ fields above, and writes everything else back untouched. Sidecars are written at
   (it has `boorucraft:Hash`), its tags replace the file's tags; if not (a sidecar from another
   app), its tags are added and nothing is removed. Tags not in the central list go to the
   "Unknown tags" screen. A setting turns this off.
-- **Rebuild**: if `collection.json` is lost, "Rebuild from sidecars" recreates tags, ratings and
-  sources from the XMP files.
+- **Rebuild**: a file new to the collection always has its sidecar read, whatever the scan cache
+  says. So if `collection.json` is lost, the next scan recreates tags, ratings and sources from
+  the XMP files, and pictures moved in from another tagged folder bring their tags along. Pools,
+  versions and "not duplicates" choices live only in `collection.json` and are not recovered.
 
 Sidecars are never counted as collection files, and a sidecar without a matching file is left
 alone. A setting turns sidecars off for a collection, and "Remove sidecars" deletes only the

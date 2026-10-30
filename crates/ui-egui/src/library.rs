@@ -13,7 +13,7 @@ use boorucraft_dedup::Hashes;
 use boorucraft_index::{
     FolderWatcher, Relevance, ScanCache, ScanReport, SidecarReport, classify, find_groups, needing_hashes, scan, set_hashes, sidecar_rel, write_sidecars,
 };
-use boorucraft_store::{Collection, DiskChange, FileEntry, Links, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
+use boorucraft_store::{Collection, DiskChange, FileEntry, Links, Recovery, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
 use boorucraft_thumbs::ThumbCache;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -160,6 +160,9 @@ pub struct OpenCollection {
     watch_pending: Vec<PathBuf>,
     /// A rescan is due then, because files changed.
     pub rescan_at: Option<Instant>,
+    /// collection.json doesn't parse: `Some(true)` if its `.bak` can be loaded instead. See
+    /// [`Library::recover_collection`].
+    pub damaged: Option<bool>,
 }
 
 impl OpenCollection {
@@ -349,6 +352,7 @@ impl Library {
             }
             other => other,
         };
+        let mut damaged = None;
         let (state, root_path) = match opened {
             Ok(mut c) => {
                 let changed = c.apply_tag_history(&self.tags);
@@ -366,6 +370,7 @@ impl Library {
                     outside_change: false,
                     watch_pending: Vec::new(),
                     rescan_at: None,
+                    damaged: None,
                 };
                 if !changed.is_empty() {
                     oc.dirty_since = Some(Instant::now());
@@ -381,7 +386,10 @@ impl Library {
                 self.dupes_stale = true;
                 (None, root)
             }
-            Err(e) => (Some(e.to_string()), root.to_path_buf()),
+            Err(e) => {
+                damaged = matches!(e, StoreError::Json { .. }).then(|| Collection::backup_is_readable(root));
+                (Some(e.to_string()), root.to_path_buf())
+            }
         };
         if let Some(err) = state {
             self.notify(format!("Couldn't open {}: {err}", root_path.display()));
@@ -397,6 +405,7 @@ impl Library {
                 outside_change: false,
                 watch_pending: Vec::new(),
                 rescan_at: None,
+                damaged,
             });
         } else {
             let idx = self.colls.len() - 1;
@@ -406,6 +415,49 @@ impl Library {
             self.config.collections.push(root_path);
             self.save_config();
         }
+    }
+
+    /// Opens a collection whose collection.json is damaged, from its backup or from nothing (the
+    /// scan that follows reads tags, ratings and sources back from the sidecars). A copy of the
+    /// damaged file goes to `damaged/` in the config folder first.
+    pub fn recover_collection(&mut self, idx: usize, from: Recovery) {
+        let Some(oc) = self.colls.get(idx) else { return };
+        let (root, name) = (oc.root.clone(), oc.name.clone());
+        let copy = match Collection::copy_damaged(&root, &self.dirs.config.join("damaged")) {
+            Ok(p) => p,
+            Err(e) => {
+                self.notify(format!("{name}: couldn't keep a copy of the damaged collection.json, so it wasn't touched: {e}"));
+                return;
+            }
+        };
+        let mut c = match Collection::open_recovering(&root, from) {
+            Ok(c) => c,
+            Err(e) => {
+                self.notify(format!("{name}: couldn't recover: {e}"));
+                return;
+            }
+        };
+        c.apply_tag_history(&self.tags);
+        let root = c.root().to_path_buf();
+        let cache = ScanCache::load(&self.dirs.cache, &root);
+        if let Some(w) = &mut self.watcher {
+            let _ = w.watch(&root, true);
+        }
+        if let Some(oc) = self.colls.get_mut(idx) {
+            oc.index = SearchIndex::build(&c);
+            oc.state = CollState::Ready { c: Box::new(c), cache: Box::new(cache) };
+            oc.root = root;
+            oc.damaged = None;
+            oc.dirty_since = Some(Instant::now());
+        }
+        self.usage = None;
+        self.dupes_stale = true;
+        let what = match from {
+            Recovery::Backup => "loaded the backup",
+            Recovery::Empty => "rebuilding from the sidecars",
+        };
+        self.notify(format!("{name}: {what}; the damaged collection.json was copied to {}", copy.display()));
+        self.start_scan(idx);
     }
 
     pub fn close_collection(&mut self, idx: usize) {
@@ -2133,6 +2185,50 @@ mod tests {
         lib.flush_all();
         let a = std::fs::read_to_string(pics.join("a.png.xmp")).unwrap();
         assert!(a.contains(">cat<") && !a.contains("junk") && a.contains("beach"), "{a}");
+    }
+
+    #[test]
+    fn a_damaged_collection_is_recovered_from_its_backup_or_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pics = tmp.path().join("pics");
+        std::fs::create_dir_all(&pics).unwrap();
+        picture(&pics.join("a.png"), 10);
+        let mut lib = library(tmp.path(), &pics);
+        lib.create_tag("cat");
+        lib.search("");
+        let all = lib.hits.clone();
+        lib.edit_tags(&all, &["cat".into()], &[]);
+        lib.set_rating(&all, Some(Rating::Explicit));
+        lib.flush_all();
+        drop(lib);
+        let json = pics.join("collection.json");
+
+        // Damaged, with a good backup.
+        std::fs::write(&json, "{ damaged").unwrap();
+        let mut lib = library(tmp.path(), &pics);
+        assert_eq!(lib.colls[0].damaged, Some(true));
+        assert!(matches!(lib.colls[0].state, CollState::Failed(_)));
+        lib.recover_collection(0, Recovery::Backup);
+        poll_until(&mut lib, "scan", |l| !l.is_busy());
+        assert_eq!(lib.colls[0].damaged, None);
+        lib.flush_all();
+        let kept: Vec<_> = std::fs::read_dir(tmp.path().join("cfg/damaged")).unwrap().flatten().collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read_to_string(kept[0].path()).unwrap(), "{ damaged", "a copy of the damaged file is kept");
+        assert!(kept[0].file_name().to_string_lossy().starts_with("pics-"));
+        drop(lib);
+
+        // Damaged with no usable backup: rebuilt from the sidecars.
+        std::fs::write(&json, "{ damaged").unwrap();
+        std::fs::remove_file(pics.join("collection.json.bak")).unwrap();
+        let mut lib = library(tmp.path(), &pics);
+        assert_eq!(lib.colls[0].damaged, Some(false));
+        lib.recover_collection(0, Recovery::Empty);
+        poll_until(&mut lib, "scan", |l| !l.is_busy());
+        lib.search("cat rating:e");
+        assert_eq!(lib.hits.len(), 1, "tag and rating came back from the sidecar");
+        lib.flush_all();
+        assert!(std::fs::read_to_string(&json).unwrap().contains("\"cat\""));
     }
 
     #[test]
