@@ -292,6 +292,7 @@ container crates. Playback would still go to the system player.
 | `md5:…` `hash:3fa9` | exact MD5 (32 hex digits) / SHA-256 prefix (4+ digits) |
 | `missing:yes` | the file wasn't found in the last scan |
 | `dupes:yes` `dupes:no` | has a near-duplicate in the open collections |
+| `pool:my_comic` `pool:trip_*` `pool:any` `pool:none` | in a pool; a search for one pool lists it in pool order (`order:-pool` reverses) |
 | `parent:3fa9` `parent:none` `parent:any` `child:yes` | a file and its versions (SHA-256 prefix); files without / with a parent; files with versions |
 | `order:date` `order:-date` `order:filesize` `order:name` `order:random` | sort order, one per search |
 
@@ -358,6 +359,26 @@ refused.
   copies' children to it; trashing a parent otherwise unlinks its children.
 - **CLI**: `tag DIR FILE --parent OTHER|none`; `info` shows parent and children.
 - Not written to XMP sidecars (other apps have no field for it); `collection.json` only.
+
+## Pools (M3.4)
+
+A pool is a named, ordered group of files: comic pages, a photo series, a trip. Pool names live
+in the central `tags.json` next to the tags (`"pools": {"my_comic": {"description": ""}}`), so
+the same pool can hold files from several collections, and renames and deletes are recorded in
+`history` (`rename-pool`, `delete-pool`) for collections that weren't open. Each file stores
+its position: `"pools": {"my_comic": 3}` in `collection.json`. Positions are renumbered 1, 2, 3…
+after every change; files from different collections interleave by position.
+
+- **Left sidebar**: every pool with its size in the open collections; click shows it.
+- **Tag panel → Pools**: the selection's pools (with the page number for one file; × takes
+  files out), "Add to pool…" with autocomplete, "Create pool “x” and add". While a pool is
+  shown, First / Earlier / Later / Last move the selection (keys `[` `]`, with Shift for
+  first/last); moved files stay selected.
+- **Grid**: page numbers on the tiles while a pool is shown; the viewer's next/previous follows
+  the pool's order.
+- **CLI**: `pools`, `pools create|delete NAME`, `pools rename OLD NEW`,
+  `pools add|remove DIR NAME FILE...`.
+- Not written to XMP sidecars.
 
 ## UI
 

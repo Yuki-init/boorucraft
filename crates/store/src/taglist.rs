@@ -30,12 +30,20 @@ pub struct TagInfo {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolInfo {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "lowercase")]
+#[serde(tag = "op", rename_all = "kebab-case")]
 pub enum HistoryOp {
     Rename { from: String, to: String },
     Merge { from: Vec<String>, into: String },
     Delete { tag: String },
+    RenamePool { from: String, to: String },
+    DeletePool { pool: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +63,9 @@ struct TagListFile {
     namespaces: BTreeMap<String, NamespaceInfo>,
     #[serde(default)]
     tags: BTreeMap<String, TagInfo>,
+    /// Pools: named, ordered groups of files (positions live in each collection).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pools: BTreeMap<String, PoolInfo>,
     #[serde(default)]
     history: Vec<HistoryEntry>,
 }
@@ -71,6 +82,7 @@ impl Default for TagListFile {
                 .map(|(k, v)| (k.to_string(), v))
                 .collect(),
             tags: BTreeMap::new(),
+            pools: BTreeMap::new(),
             history: Vec::new(),
         }
     }
@@ -309,6 +321,77 @@ impl TagList {
         Ok(())
     }
 
+    pub fn pools(&self) -> impl Iterator<Item = (&str, &PoolInfo)> {
+        self.data.pools.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    pub fn has_pool(&self, name: &str) -> bool {
+        self.data.pools.contains_key(name)
+    }
+
+    /// A pool name in its stored form (like a tag: lowercase, `_` for spaces), refusing the
+    /// words `pool:` searches use.
+    pub fn normalize_pool(input: &str) -> Result<String> {
+        let name = normalize_tag(input)?;
+        if matches!(name.as_str(), "any" | "none") || name.contains('*') {
+            return Err(StoreError::Invalid(format!("`{name}` can't be a pool name")));
+        }
+        Ok(name)
+    }
+
+    /// Normalises `input` and checks that the pool exists.
+    pub fn resolve_pool(&self, input: &str) -> Result<String> {
+        let name = Self::normalize_pool(input)?;
+        if self.has_pool(&name) { Ok(name) } else { Err(StoreError::UnknownPool(name)) }
+    }
+
+    /// Pools starting with, then containing, `input`.
+    pub fn suggest_pools(&self, input: &str, limit: usize) -> Vec<&str> {
+        let needle = input.trim().to_lowercase().replace(char::is_whitespace, "_");
+        let mut out: Vec<&str> = self.data.pools.keys().map(String::as_str).filter(|p| p.starts_with(&needle)).take(limit).collect();
+        for p in self.data.pools.keys() {
+            if out.len() >= limit {
+                break;
+            }
+            if p.contains(&needle) && !out.contains(&p.as_str()) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    pub fn create_pool(&mut self, input: &str, description: &str) -> Result<String> {
+        let name = Self::normalize_pool(input)?;
+        if self.has_pool(&name) {
+            return Err(StoreError::PoolExists(name));
+        }
+        self.data.pools.insert(name.clone(), PoolInfo { description: description.trim().to_string() });
+        self.dirty = true;
+        Ok(name)
+    }
+
+    pub fn rename_pool(&mut self, from: &str, to: &str) -> Result<String> {
+        let from = Self::normalize_pool(from)?;
+        let to = Self::normalize_pool(to)?;
+        if self.has_pool(&to) {
+            return Err(StoreError::PoolExists(to));
+        }
+        let info = self.data.pools.remove(&from).ok_or_else(|| StoreError::UnknownPool(from.clone()))?;
+        self.data.pools.insert(to.clone(), info);
+        self.record(HistoryOp::RenamePool { from, to: to.clone() });
+        Ok(to)
+    }
+
+    /// Removes a pool (the files stay; they just leave the pool).
+    pub fn delete_pool(&mut self, name: &str) -> Result<()> {
+        let pool = Self::normalize_pool(name)?;
+        if self.data.pools.remove(&pool).is_none() {
+            return Err(StoreError::UnknownPool(pool));
+        }
+        self.record(HistoryOp::DeletePool { pool });
+        Ok(())
+    }
+
     /// Changes made after `revision`, oldest first.
     pub fn history_since(&self, revision: u64) -> impl Iterator<Item = &HistoryEntry> {
         self.data.history.iter().filter(move |h| h.revision > revision)
@@ -407,6 +490,22 @@ mod tests {
         assert_eq!(ops, vec![HistoryOp::Merge { from: vec!["feline".into(), "puss".into()], into: "cat".into() }, HistoryOp::Delete { tag: "junk".into() }]);
         let names: Vec<_> = t.tags().map(|(k, _)| k).collect();
         assert_eq!(names, vec!["cat", "kitten"]);
+    }
+
+    #[test]
+    fn pools() {
+        let mut t = TagList::in_memory();
+        assert_eq!(t.create_pool("My Comic", "").unwrap(), "my_comic");
+        assert!(matches!(t.create_pool("my comic", ""), Err(StoreError::PoolExists(_))));
+        assert!(t.create_pool("none", "").is_err() && t.create_pool("a*", "").is_err());
+        assert_eq!(t.suggest_pools("com", 5), vec!["my_comic"]);
+        assert_eq!(t.rename_pool("my_comic", "trip").unwrap(), "trip");
+        t.delete_pool("trip").unwrap();
+        let ops: Vec<_> = t.history_since(0).map(|h| h.op.clone()).collect();
+        assert_eq!(ops, vec![HistoryOp::RenamePool { from: "my_comic".into(), to: "trip".into() }, HistoryOp::DeletePool { pool: "trip".into() }]);
+        assert!(matches!(t.resolve_pool("trip"), Err(StoreError::UnknownPool(_))));
+        let json = serde_json::to_string(&t.history_since(0).next().unwrap()).unwrap();
+        assert!(json.contains("\"op\":\"rename-pool\""), "{json}");
     }
 
     #[test]

@@ -26,12 +26,17 @@ const USAGE: &str = "usage:
   boorucraft-cli tags rename OLD NEW
   boorucraft-cli tags merge INTO FROM...
   boorucraft-cli tags delete TAG...
+  boorucraft-cli pools                       list pools (named, ordered groups)
+  boorucraft-cli pools create|delete NAME
+  boorucraft-cli pools rename OLD NEW
+  boorucraft-cli pools add DIR NAME FILE...  append files to a pool, in this order
+  boorucraft-cli pools remove DIR NAME FILE...
   boorucraft-cli tags namespaces
   boorucraft-cli tags add-namespace NAME [COLOR]
 
 Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
   rating:s,q  width:>1920  height:<=1080  ratio:16:9  mpixels:>2  filesize:<2MB
-  type:png,gif  kind:video  animated:yes  missing:yes  dupes:yes  parent:3fa9  child:yes  tagcount:0  md5:…  hash:3fa9
+  type:png,gif  kind:video  animated:yes  missing:yes  dupes:yes  parent:3fa9  child:yes  pool:name  tagcount:0  md5:…  hash:3fa9
   date:2024-01..2024-06  date:>2023-05-01  imported:<7d  path:\"holiday 2023\"  source:none
   order:date  order:-filesize  order:name  order:random  (default: newest imported first)
 Environment: BOORUCRAFT_TAGS (tag list file), BOORUCRAFT_CONFIG_DIR, BOORUCRAFT_CACHE_DIR";
@@ -60,6 +65,7 @@ fn run(args: &[String]) -> Res {
         ["unknown", dir] => cmd_unknown(Path::new(dir)),
         ["dupes", rest @ ..] if !rest.is_empty() => cmd_dupes(rest),
         ["tags", rest @ ..] => cmd_tags(rest),
+        ["pools", rest @ ..] => cmd_pools(rest),
         ["help" | "--help" | "-h"] => {
             println!("{USAGE}");
             Ok(())
@@ -395,6 +401,66 @@ fn cmd_unknown(dir: &Path) -> Res {
         println!("{n:>6}  {t}{hint}");
     }
     Ok(())
+}
+
+fn cmd_pools(rest: &[&str]) -> Res {
+    match rest {
+        [] => {
+            let tags = open_tags(false)?;
+            for (p, info) in tags.pools() {
+                if info.description.is_empty() {
+                    println!("{p}");
+                } else {
+                    println!("{p}  — {}", info.description);
+                }
+            }
+            Ok(())
+        }
+        [cmd @ ("add" | "remove"), dir, name, files @ ..] if !files.is_empty() => {
+            let tags = open_tags(false)?;
+            let pool = tags.resolve_pool(name).map_err(err)?;
+            let (mut c, cache) = open_collection(Path::new(dir), true, &tags)?;
+            let hashes: Vec<String> = files.iter().map(|f| find_file(&c, Path::new(f))).collect::<Res<_>>()?;
+            let mut members: Vec<(u32, String)> = c.files().filter_map(|(h, e)| e.pools.get(&pool).map(|n| (*n, h.to_string()))).collect();
+            members.sort();
+            let mut order: Vec<String> = members.into_iter().map(|(_, h)| h).collect();
+            if *cmd == "add" {
+                for h in hashes {
+                    if !order.contains(&h) {
+                        order.push(h);
+                    }
+                }
+            } else {
+                order.retain(|h| !hashes.contains(h));
+                for h in &hashes {
+                    if let Some(e) = c.get_mut(h) {
+                        e.pools.remove(&pool);
+                    }
+                }
+            }
+            for (h, n) in order.iter().zip(1u32..) {
+                if let Some(e) = c.get_mut(h) {
+                    e.pools.insert(pool.clone(), n);
+                }
+            }
+            save(&mut c, &cache)?;
+            println!("{pool}: {} file(s) in this collection", order.len());
+            Ok(())
+        }
+        [cmd, args @ ..] => {
+            let mut tags = open_tags(true)?;
+            match (*cmd, args) {
+                ("create", [name]) => println!("created pool `{}`", tags.create_pool(name, "").map_err(err)?),
+                ("rename", [from, to]) => println!("renamed to `{}`; collections update when next opened", tags.rename_pool(from, to).map_err(err)?),
+                ("delete", [name]) => {
+                    tags.delete_pool(name).map_err(err)?;
+                    println!("deleted; collections update when next opened (the files stay)");
+                }
+                _ => return Err(format!("unrecognised pools command\n\n{USAGE}")),
+            }
+            tags.save().map_err(err)
+        }
+    }
 }
 
 /// `tags` subcommands that change the tag list.

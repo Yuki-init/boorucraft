@@ -22,13 +22,14 @@ use boorucraft_core::{Rating, normalize_tag};
 use boorucraft_thumbs::ThumbCache;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Key, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
-use library::{CollState, Config, Dirs, Hit, Library};
+use library::{CollState, Config, Dirs, Hit, Library, PoolMove};
 use selection::Selection;
 use thumbnails::{Thumb, Thumbnails};
 use viewer::Viewer;
 
 const SEARCH_ID: &str = "search";
 const TAG_INPUT_ID: &str = "tag-input";
+const POOL_INPUT_ID: &str = "pool-input";
 const GAP: f32 = 6.0;
 const ACCENT: Color32 = Color32::from_rgb(90, 150, 240);
 /// Most tags listed in the sidebar.
@@ -74,6 +75,7 @@ pub struct App {
     /// Grid scroll offset and height from the last frame.
     grid_view: (f32, f32),
     tag_input: String,
+    pool_input: String,
     /// Tags typed that aren't in the tag list, waiting for "Create".
     unknown_typed: Vec<String>,
     source_edit: Option<(Hit, String)>,
@@ -116,6 +118,7 @@ impl App {
             scroll_to: None,
             grid_view: (0.0, 0.0),
             tag_input: String::new(),
+            pool_input: String::new(),
             unknown_typed: Vec::new(),
             source_edit: None,
             focus: None,
@@ -216,6 +219,8 @@ impl App {
                 Key::Num2 => self.rate(Some(Rating::Questionable)),
                 Key::Num3 => self.rate(Some(Rating::Explicit)),
                 Key::Num0 => self.rate(None),
+                Key::OpenBracket => self.move_in_pool(if m.shift { PoolMove::First } else { PoolMove::Earlier }),
+                Key::CloseBracket => self.move_in_pool(if m.shift { PoolMove::Last } else { PoolMove::Later }),
                 _ => {}
             }
             if let Some(v) = &mut self.viewer {
@@ -268,6 +273,35 @@ impl App {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Moves the selected files within the pool being viewed, keeping them selected.
+    fn move_in_pool(&mut self, to: PoolMove) {
+        let Some(pool) = self.lib.pool_view.clone() else { return };
+        let targets = self.targets();
+        if targets.is_empty() {
+            return;
+        }
+        let cursor = self.sel.cursor.and_then(|c| self.lib.hits.get(c)).cloned();
+        self.lib.move_in_pool(&pool, &targets, to);
+        self.lib.search(&self.query);
+        self.searched = Some(self.query.clone());
+        // Follow the moved files.
+        self.sel.clear();
+        for (i, h) in self.lib.hits.iter().enumerate() {
+            if targets.contains(h) {
+                self.sel.click(i, true, false);
+            }
+        }
+        if let Some(c) = cursor.and_then(|c| self.lib.hits.iter().position(|h| *h == c)) {
+            self.sel.cursor = Some(c);
+            self.scroll_to = Some(c);
+        }
+        if let Some(v) = &mut self.viewer
+            && let Some(p) = self.lib.hits.iter().position(|h| *h == v.hit)
+        {
+            v.pos = p;
         }
     }
 
@@ -471,7 +505,11 @@ impl App {
                     for col in 0..cols {
                         let i = row * cols + col;
                         let Some(hit) = self.lib.hits.get(i) else { break };
+                        let page = self.lib.pool_view.as_deref().and_then(|p| self.lib.entry(hit)?.pools.get(p).copied());
                         let resp = draw_tile(ui, &self.lib, &mut self.thumbs, hit, tile, self.sel.items.contains(&i), self.sel.cursor == Some(i));
+                        if let Some(n) = page {
+                            corner_badge(ui.painter(), resp.rect, format!("#{n}"));
+                        }
                         if resp.double_clicked() {
                             activated = Some(i);
                         } else if resp.clicked() {
@@ -509,8 +547,89 @@ impl App {
                 self.source_row(ui, &targets[0]);
             }
             ui.separator();
+            self.pool_section(ui, &targets);
+            ui.separator();
             self.family_section(ui, &targets);
         });
+    }
+
+    /// The pools of the selected files: remove, add (with autocomplete), create, and reorder
+    /// while a pool is being viewed.
+    fn pool_section(&mut self, ui: &mut egui::Ui, targets: &[Hit]) {
+        ui.label(RichText::new("Pools").strong()).on_hover_text("Named, ordered groups: comic pages, a photo series…");
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for e in targets.iter().filter_map(|h| self.lib.entry(h)) {
+            for p in e.pools.keys() {
+                *counts.entry(p.clone()).or_default() += 1;
+            }
+        }
+        let mut remove = None;
+        let mut show = None;
+        if !counts.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for (pool, n) in &counts {
+                    let page = match targets {
+                        [hit] => self.lib.entry(hit).and_then(|e| e.pools.get(pool)).map(|p| format!(" #{p}")).unwrap_or_default(),
+                        _ => format!(" ({n})"),
+                    };
+                    if tag_chip(ui, &format!("{pool}{page}"), POOL_COLOR, "Click × to take the file(s) out of the pool") {
+                        remove = Some(pool.clone());
+                    }
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                for pool in counts.keys() {
+                    if ui.small_button(format!("View {pool}")).clicked() {
+                        show = Some(pool.clone());
+                    }
+                }
+            });
+        }
+        let edit = egui::TextEdit::singleline(&mut self.pool_input).hint_text("Add to pool…").desired_width(f32::INFINITY);
+        let tags = &self.lib.tags;
+        let out = egui::CompletionPopup::new(egui::Id::unique(POOL_INPUT_ID))
+            .align(egui::RectAlign::BOTTOM_START)
+            .max_height(240.0)
+            .show(ui, edit, |q| suggest::for_pool_input(q.word, tags).into_iter().map(|s| popup_item(tags, s)).collect());
+        let resp = out.text_edit.response.response;
+        let submitted = out.accepted.is_none() && resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        let typed = self.pool_input.trim().to_string();
+        let known = boorucraft_store::TagList::normalize_pool(&typed).ok().filter(|p| self.lib.tags.has_pool(p));
+        if submitted && let Some(pool) = &known {
+            let n = self.lib.add_to_pool(targets, pool);
+            self.lib.notify(format!("Added {n} file{} to {pool}", if n == 1 { "" } else { "s" }));
+            self.pool_input.clear();
+        }
+        if !typed.is_empty() && known.is_none() && ui.button(format!("Create pool “{typed}” and add")).clicked() {
+            if let Some(pool) = self.lib.create_pool(&typed) {
+                self.lib.add_to_pool(targets, &pool);
+            }
+            self.pool_input.clear();
+        }
+        if let Some(pool) = self.lib.pool_view.clone()
+            && targets.iter().any(|h| self.lib.entry(h).is_some_and(|e| e.pools.contains_key(&pool)))
+        {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Move").color(Color32::from_gray(170)));
+                for (label, key, to) in [
+                    ("First", "Shift+[", PoolMove::First),
+                    ("Earlier", "[", PoolMove::Earlier),
+                    ("Later", "]", PoolMove::Later),
+                    ("Last", "Shift+]", PoolMove::Last),
+                ] {
+                    if ui.small_button(label).on_hover_text(format!("Key {key}")).clicked() {
+                        self.move_in_pool(to);
+                    }
+                }
+            });
+        }
+        if let Some(pool) = remove {
+            self.lib.remove_from_pool(targets, &pool);
+        }
+        if let Some(pool) = show {
+            self.query = format!("pool:{pool}");
+            self.viewer = None;
+        }
     }
 
     /// Parent and children: show the family, unlink, or link a selection as versions.
@@ -677,11 +796,24 @@ impl App {
 
     /// Left panel, below the collections: the tags of the current results.
     fn results_sidebar(&mut self, ui: &mut egui::Ui) {
-        let total = self.lib.hits.len();
-        if total == 0 {
+        let mut toggle: Option<String> = None;
+        let pools = self.lib.pool_counts().to_vec();
+        if !pools.is_empty() {
+            ui.label(RichText::new("Pools").strong()).on_hover_text("Click: show the pool in its order (click again to go back)");
+            for (pool, n) in &pools {
+                let term = format!("pool:{pool}");
+                if sidebar_link(ui, pool, *n as u64, query_has(&self.query, &term), POOL_COLOR) {
+                    toggle = Some(term);
+                }
+            }
+            ui.add_space(6.0);
+        }
+        if self.lib.hits.is_empty() {
+            if let Some(term) = toggle {
+                self.query = toggle_term(&self.query, &term);
+            }
             return;
         }
-        let mut toggle: Option<String> = None;
         ui.label(RichText::new("Ratings").strong());
         let [s, q, e, none] = self.lib.result_ratings;
         for (label, term, n) in [("Safe", "rating:s", s), ("Questionable", "rating:q", q), ("Explicit", "rating:e", e), ("Unrated", "-rating:s,q,e", none)] {
@@ -1017,6 +1149,15 @@ fn draw_tile(ui: &mut egui::Ui, lib: &Library, thumbs: &mut Thumbnails, hit: &Hi
     })
 }
 
+/// A label in the bottom-left corner of a tile (pool page numbers).
+fn corner_badge(painter: &egui::Painter, rect: Rect, text: String) {
+    let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
+    let size = galley.size() + vec2(8.0, 4.0);
+    let r = Rect::from_min_size(pos2(rect.left() + 6.0, rect.bottom() - 6.0 - size.y), size);
+    painter.rect_filled(r, CornerRadius::same(3), Color32::from_rgba_unmultiplied(20, 90, 85, 220));
+    painter.galley(r.min + vec2(4.0, 2.0), galley, Color32::WHITE);
+}
+
 fn badge(painter: &egui::Painter, rect: Rect, text: String) {
     let galley = painter.layout_no_wrap(text, FontId::proportional(10.0), Color32::WHITE);
     let r = Rect::from_min_size(rect.left_top() + vec2(6.0, 6.0), galley.size() + vec2(8.0, 4.0));
@@ -1148,6 +1289,7 @@ fn toggle_term(query: &str, term: &str) -> String {
 }
 
 const META_COLOR: Color32 = Color32::from_rgb(200, 160, 240);
+const POOL_COLOR: Color32 = Color32::from_rgb(120, 200, 190);
 
 /// Colours the search text: `-` terms red, `~` terms blue, metatags purple, and the term with
 /// an error underlined.

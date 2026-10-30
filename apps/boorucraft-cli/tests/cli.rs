@@ -164,3 +164,23 @@ fn near_duplicates() {
     e.ok(&["tag", dir, &small, "--parent", "none"]);
     assert!(e.ok(&["search", dir, "parent:any"]).is_empty());
 }
+
+#[test]
+fn pools() {
+    let e = Env::new();
+    let (dir, a, b) = (e.dir(), e.file("a.png"), e.file("b.png"));
+    e.ok(&["scan", dir]);
+    assert!(e.fails(&["pools", "add", dir, "comic", &a]).contains("create it first"));
+    e.ok(&["pools", "create", "Comic"]);
+    e.ok(&["pools", "add", dir, "comic", &b, &a]);
+    assert_eq!(names(&e.ok(&["search", dir, "pool:comic"])), vec!["b.png", "a.png"], "pool order");
+    e.ok(&["pools", "rename", "comic", "manga"]);
+    assert_eq!(names(&e.ok(&["search", dir, "pool:manga", "order:-pool"])), vec!["a.png", "b.png"]);
+    e.ok(&["pools", "remove", dir, "manga", &b]);
+    assert_eq!(names(&e.ok(&["search", dir, "pool:any"])), vec!["a.png"]);
+    assert!(e.read("collection.json").contains("\"manga\": 1"));
+    e.ok(&["pools", "delete", "manga"]);
+    e.ok(&["scan", dir]);
+    assert!(!e.read("collection.json").contains("manga"), "deleted pools leave the files");
+    assert!(e.ok(&["pools"]).is_empty());
+}

@@ -40,6 +40,10 @@ pub enum StoreError {
     BadNamespace(String),
     #[error("namespace `{0}` already exists")]
     NamespaceExists(String),
+    #[error("pool `{0}` is not in the pool list; create it first")]
+    UnknownPool(String),
+    #[error("pool `{0}` already exists")]
+    PoolExists(String),
     #[error("{0}")]
     Invalid(String),
 }

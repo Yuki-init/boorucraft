@@ -53,9 +53,11 @@ pub fn for_search(word: &str, usage: &[(String, u64)], tags: &TagList) -> Vec<Su
     {
         // order: takes no prefix.
         let prefix = if name == "order" { "" } else { prefix };
-        return metatag_values(name)
-            .iter()
-            .filter(|v| v.starts_with(value) && **v != value)
+        let pools: Vec<&str> = if name == "pool" { tags.suggest_pools(value, LIMIT) } else { Vec::new() };
+        return pools
+            .into_iter()
+            .chain(metatag_values(name).iter().copied())
+            .filter(|v| v.starts_with(value) && *v != value)
             .take(LIMIT)
             .map(|v| Suggestion { insert: format!("{prefix}{name}:{v} "), label: format!("{name}:{v}"), detail: String::new(), tag: None })
             .collect();
@@ -108,6 +110,18 @@ pub fn for_tag_input(word: &str, usage: &[(String, u64)], tags: &TagList) -> Vec
     found.into_iter().filter(|t| **t != needle).take(LIMIT).map(|t| tag_suggestion(prefix, t, count(t))).collect()
 }
 
+/// Pool names for the "add to pool" box.
+pub fn for_pool_input(word: &str, tags: &TagList) -> Vec<Suggestion> {
+    if word.is_empty() {
+        return Vec::new();
+    }
+    tags.suggest_pools(word, LIMIT)
+        .into_iter()
+        .filter(|p| *p != word)
+        .map(|p| Suggestion { insert: p.to_string(), label: p.to_string(), detail: String::new(), tag: None })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +161,10 @@ mod tests {
         assert!(for_search("", &u, &t).is_empty());
         assert!(for_search("cat*", &u, &t).is_empty());
         assert!(for_search("kind:video", &u, &t).is_empty(), "nothing left to complete");
+        let mut t = t;
+        t.create_pool("trip", "").unwrap();
+        assert_eq!(inserts(&for_search("pool:", &u, &t)), vec!["pool:trip ", "pool:any ", "pool:none "]);
+        assert_eq!(inserts(&for_pool_input("tr", &t)), vec!["trip"]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Everything the window shows, without egui: the tag list, the open collections, background
 //! scans, searches across collections, edits and debounced saves.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,6 +66,15 @@ impl Config {
         bytes.push(b'\n');
         safefile::write_atomic(&path, &bytes, false).map(|_| ()).map_err(|e| e.to_string())
     }
+}
+
+/// Where to move files within a pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolMove {
+    Earlier,
+    Later,
+    First,
+    Last,
 }
 
 /// Moves a file to the system trash (replaced in tests).
@@ -144,12 +153,16 @@ pub struct Library {
     pub query_error: Option<(String, std::ops::Range<usize>)>,
     /// Messages for the user (errors and notes), newest last.
     pub messages: Vec<(String, Instant)>,
+    /// The pool whose order the current results follow (a `pool:name` search).
+    pub pool_view: Option<String>,
     /// Tags of the current results with counts, most used first.
     pub result_tags: Vec<(String, u64)>,
     /// Ratings of the current results: safe, questionable, explicit, none.
     pub result_ratings: [u64; 4],
     /// Tag counts over every open collection (for autocomplete); `None` until next asked for.
     usage: Option<Vec<(String, u64)>>,
+    /// Pool sizes, recounted with `usage`.
+    pool_counts: Vec<(String, usize)>,
     /// Shuffles `order:random`; fixed for the session so results don't jump around.
     seed: u64,
     /// Near-duplicate groups over the open collections, best copy first.
@@ -208,9 +221,11 @@ impl Library {
             hits: Vec::new(),
             query_error: None,
             messages,
+            pool_view: None,
             result_tags: Vec::new(),
             result_ratings: [0; 4],
             usage: None,
+            pool_counts: Vec::new(),
             seed: seed_now(),
             dupe_groups: Vec::new(),
             dupes_stale: true,
@@ -531,6 +546,7 @@ impl Library {
             }
         };
         query.seed = self.seed;
+        self.pool_view = query.pool_order().map(str::to_string);
         self.refresh_dupes();
         self.links.parents = self.colls.iter().flat_map(|oc| oc.index.parents()).map(str::to_string).collect();
         let now = chrono::Utc::now();
@@ -540,7 +556,7 @@ impl Library {
                 rows.extend(oc.index.matching_rows(&query, now, &self.links).into_iter().map(|r| (i, r)));
             }
         }
-        rows.sort_by(|a, b| compare_rows(query.order.as_ref(), query.seed, a.1, b.1).then(a.0.cmp(&b.0)));
+        rows.sort_by(|a, b| compare_rows(&query, a.1, b.1).then(a.0.cmp(&b.0)));
         self.hits = rows.into_iter().map(|(coll, r)| Hit { coll, hash: r.hash.clone() }).collect();
         self.recount();
     }
@@ -583,6 +599,7 @@ impl Library {
             let mut sorted: Vec<(String, u64)> = counts.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
             sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             self.usage = Some(sorted);
+            self.pool_counts = self.count_pools();
         }
     }
 
@@ -875,6 +892,158 @@ impl Library {
             self.notify(format!("Couldn't move to the trash: {e}"));
         }
         removed
+    }
+
+    /// Adds a pool to the central list. Returns its normalised name.
+    pub fn create_pool(&mut self, name: &str) -> Option<String> {
+        if self.tags.is_read_only() {
+            self.notify("The tag list is open in another BooruCraft; new pools can't be created here");
+            return None;
+        }
+        self.usage = None;
+        match self.tags.create_pool(name, "") {
+            Ok(p) => {
+                if let Err(e) = self.tags.save() {
+                    self.notify(format!("Couldn't save the tag list: {e}"));
+                }
+                Some(p)
+            }
+            Err(StoreError::PoolExists(p)) => Some(p),
+            Err(e) => {
+                self.notify(e.to_string());
+                None
+            }
+        }
+    }
+
+    /// The files of a pool in the open collections, in order.
+    pub fn pool_members(&self, pool: &str) -> Vec<Hit> {
+        let mut out: Vec<(u32, Hit)> = Vec::new();
+        for (coll, oc) in self.colls.iter().enumerate() {
+            let Some(c) = oc.collection() else { continue };
+            out.extend(c.files().filter_map(|(h, e)| e.pools.get(pool).map(|n| (*n, Hit { coll, hash: h.to_string() }))));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.hash.cmp(&b.1.hash)));
+        out.into_iter().map(|(_, h)| h).collect()
+    }
+
+    /// Every pool in the list with how many open files are in it, by name. Call
+    /// [`Self::refresh_usage`] first in a frame.
+    pub fn pool_counts(&self) -> &[(String, usize)] {
+        &self.pool_counts
+    }
+
+    fn count_pools(&self) -> Vec<(String, usize)> {
+        let mut counts: BTreeMap<String, usize> = self.tags.pools().map(|(p, _)| (p.to_string(), 0)).collect();
+        for oc in &self.colls {
+            let Some(c) = oc.collection() else { continue };
+            for (_, e) in c.files() {
+                for p in e.pools.keys() {
+                    *counts.entry(p.clone()).or_default() += 1;
+                }
+            }
+        }
+        counts.into_iter().collect()
+    }
+
+    /// Writes new positions (1, 2, 3…) for a pool's files in the given order.
+    fn renumber_pool(&mut self, pool: &str, order: &[Hit]) {
+        let positions: HashMap<&Hit, u32> = order.iter().zip(1u32..).collect();
+        let mut touched = Vec::new();
+        for hit in order {
+            let Some(&n) = positions.get(hit) else { continue };
+            let Some(oc) = self.colls.get_mut(hit.coll) else { continue };
+            let CollState::Ready { c, .. } = &mut oc.state else { continue };
+            if c.is_read_only() || c.get(&hit.hash).is_none_or(|e| e.pools.get(pool) == Some(&n)) {
+                continue;
+            }
+            if let Some(e) = c.get_mut(&hit.hash) {
+                e.pools.insert(pool.to_string(), n);
+                touched.push(hit.coll);
+            }
+        }
+        for coll in touched {
+            self.touch(coll);
+        }
+        self.reindex();
+    }
+
+    /// Rebuilds every collection's index (after pool changes, which can touch many files).
+    fn reindex(&mut self) {
+        for oc in &mut self.colls {
+            if let CollState::Ready { c, .. } = &oc.state {
+                oc.index = SearchIndex::build(c);
+            }
+        }
+        self.usage = None;
+        self.recount();
+    }
+
+    /// Adds files to the end of a pool, in the given order. Returns how many were added.
+    pub fn add_to_pool(&mut self, hits: &[Hit], pool: &str) -> usize {
+        let pool = match self.tags.resolve_pool(pool) {
+            Ok(p) => p,
+            Err(e) => {
+                self.notify(e.to_string());
+                return 0;
+            }
+        };
+        let mut order = self.pool_members(&pool);
+        let before = order.len();
+        for h in hits {
+            if !order.contains(h) && self.entry(h).is_some() && !self.colls.get(h.coll).is_some_and(OpenCollection::read_only) {
+                order.push(h.clone());
+            }
+        }
+        self.renumber_pool(&pool, &order);
+        order.len() - before
+    }
+
+    /// Takes files out of a pool (the files stay). Returns how many left it.
+    pub fn remove_from_pool(&mut self, hits: &[Hit], pool: &str) -> usize {
+        let mut removed = 0;
+        self.edit_entries(hits, |e| {
+            let hit = e.pools.remove(pool).is_some();
+            removed += usize::from(hit);
+            hit
+        });
+        let order = self.pool_members(pool);
+        self.renumber_pool(pool, &order);
+        removed
+    }
+
+    /// Moves files within a pool, keeping their order among themselves.
+    pub fn move_in_pool(&mut self, pool: &str, hits: &[Hit], to: PoolMove) {
+        let mut order = self.pool_members(pool);
+        let picked = |h: &Hit| hits.contains(h);
+        match to {
+            PoolMove::First | PoolMove::Last => {
+                let (mut sel, rest): (Vec<Hit>, Vec<Hit>) = order.into_iter().partition(|h| picked(h));
+                order = if to == PoolMove::First {
+                    sel.extend(rest);
+                    sel
+                } else {
+                    let mut r = rest;
+                    r.extend(sel);
+                    r
+                };
+            }
+            PoolMove::Earlier => {
+                for i in 1..order.len() {
+                    if picked(&order[i]) && !picked(&order[i - 1]) {
+                        order.swap(i, i - 1);
+                    }
+                }
+            }
+            PoolMove::Later => {
+                for i in (0..order.len().saturating_sub(1)).rev() {
+                    if picked(&order[i]) && !picked(&order[i + 1]) {
+                        order.swap(i, i + 1);
+                    }
+                }
+            }
+        }
+        self.renumber_pool(pool, &order);
     }
 
     /// Adds a tag to the central list. Returns its normalised name.
@@ -1186,6 +1355,48 @@ mod tests {
         assert_eq!(lib.result_ratings, [0, 0, 0, 4]);
         lib.refresh_usage();
         assert_eq!(lib.usage(), &[("cat".to_string(), 1)]);
+    }
+
+    #[test]
+    fn pools_keep_their_order_across_collections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (one, two) = (tmp.path().join("one"), tmp.path().join("two"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        for (dir, name, shade) in [(&one, "p1.png", 1), (&two, "p2.png", 2), (&one, "p3.png", 3), (&two, "p4.png", 4)] {
+            picture(&dir.join(name), shade);
+        }
+        let mut lib = libraries(tmp.path(), &[&one, &two]);
+        let names = |lib: &Library| -> Vec<String> { lib.hits.iter().map(|h| lib.entry(h).unwrap().paths.iter().next().unwrap().clone()).collect() };
+        lib.search("order:name");
+        let files = lib.hits.clone();
+        assert_eq!(lib.add_to_pool(&files, "comic"), 0, "pools must exist first");
+        assert_eq!(lib.create_pool("Comic").as_deref(), Some("comic"));
+        assert_eq!(lib.add_to_pool(&[files[2].clone(), files[0].clone()], "comic"), 2);
+        assert_eq!(lib.add_to_pool(&files, "comic"), 2, "only new files are added, at the end");
+        lib.search("pool:comic");
+        assert_eq!(names(&lib), vec!["p3.png", "p1.png", "p2.png", "p4.png"]);
+        assert_eq!(lib.pool_view.as_deref(), Some("comic"));
+
+        lib.move_in_pool("comic", &[files[3].clone()], PoolMove::First);
+        lib.move_in_pool("comic", &[files[0].clone()], PoolMove::Earlier);
+        lib.search("pool:comic");
+        assert_eq!(names(&lib), vec!["p4.png", "p1.png", "p3.png", "p2.png"]);
+        lib.move_in_pool("comic", &[files[3].clone(), files[0].clone()], PoolMove::Last);
+        lib.search("pool:comic");
+        assert_eq!(names(&lib), vec!["p3.png", "p2.png", "p4.png", "p1.png"], "moved together, in their order");
+
+        assert_eq!(lib.remove_from_pool(&files[1..2], "comic"), 1);
+        lib.search("pool:comic");
+        assert_eq!(names(&lib), vec!["p3.png", "p4.png", "p1.png"]);
+        let positions: Vec<u32> = lib.hits.iter().map(|h| lib.entry(h).unwrap().pools["comic"]).collect();
+        assert_eq!(positions, vec![1, 2, 3], "renumbered without gaps");
+        lib.refresh_usage();
+        assert_eq!(lib.pool_counts(), &[("comic".to_string(), 3)]);
+        lib.search("pool:none");
+        assert_eq!(names(&lib), vec!["p2.png"]);
+        lib.flush_all();
+        assert!(std::fs::read_to_string(two.join("collection.json")).unwrap().contains("\"comic\": 2"));
     }
 
     #[test]

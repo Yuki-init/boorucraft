@@ -176,6 +176,18 @@ pub enum ParentMatch {
     Of(String),
 }
 
+/// What `pool:` matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PoolMatch {
+    /// `pool:none`: files in no pool.
+    None,
+    /// `pool:any`: files in some pool.
+    Any,
+    Name(String),
+    /// `pool:trip_*`.
+    Glob(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TermKind {
     Tag(TagPattern),
@@ -201,6 +213,7 @@ pub enum TermKind {
     Parent(ParentMatch),
     /// Has (or hasn't) children.
     Child(bool),
+    Pool(PoolMatch),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +232,8 @@ pub enum OrderKey {
     Name,
     Path,
     Random,
+    /// Position in the pool named by the search's `pool:` term.
+    Pool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +326,18 @@ impl Query {
 
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty()
+    }
+
+    /// The pool whose order the results follow: the first required `pool:name` term, when the
+    /// search has no `order:` or has `order:pool`.
+    pub fn pool_order(&self) -> Option<&str> {
+        if self.order.is_some_and(|o| o.key != OrderKey::Pool) {
+            return None;
+        }
+        self.terms.iter().find_map(|t| match (&t.mode, &t.kind) {
+            (Mode::Must, TermKind::Pool(PoolMatch::Name(n))) => Some(n.as_str()),
+            _ => None,
+        })
     }
 }
 
@@ -434,6 +461,12 @@ fn parse_metatag(name: &str, value: &str) -> Result<TermKind, String> {
             h if (4..=64).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_hexdigit()) => ParentMatch::Of(h.to_string()),
             _ => return Err(bad(name)),
         })),
+        "pool" => Ok(TermKind::Pool(match lower.as_str() {
+            "none" => PoolMatch::None,
+            "any" => PoolMatch::Any,
+            p if p.contains('*') => PoolMatch::Glob(p.to_string()),
+            p => PoolMatch::Name(normalize_tag(p).map_err(|e| e.to_string())?),
+        })),
         "child" => Ok(TermKind::Child(match lower.as_str() {
             "any" => true,
             "none" => false,
@@ -485,6 +518,7 @@ pub const METATAG_HELP: &[(&str, &str)] = &[
     ("dupes", "dupes:yes"),
     ("parent", "parent:3fa9 (it and its children) or parent:none"),
     ("child", "child:yes (has children)"),
+    ("pool", "pool:my_comic (in its order) or pool:none"),
     ("source", "source:none or source:*pixiv*"),
     ("md5", "md5:<32 hex digits>"),
     ("hash", "hash:3fa9"),
@@ -497,13 +531,13 @@ pub fn metatag_values(name: &str) -> &'static [&'static str] {
         "rating" => &["s", "q", "e", "s,q", "q,e"],
         "kind" => &["image", "video", "other"],
         "animated" | "missing" | "dupes" | "child" => &["yes", "no"],
-        "parent" => &["any", "none"],
+        "parent" | "pool" => &["any", "none"],
         "type" => &["jpeg", "png", "gif", "webp", "jxl", "avif", "heic", "mp4", "webm", "mkv"],
         "ratio" => &["16:9", "4:3", "3:2", "1:1", "9:16", ">1", "<1"],
         "tagcount" => &["0", ">10"],
         "imported" | "date" => &["<1d", "<7d", "<30d", ">1y"],
         "source" => &["none"],
-        "order" => &["imported", "date", "-date", "filesize", "width", "height", "mpixels", "ratio", "tagcount", "name", "path", "random"],
+        "order" => &["imported", "date", "-date", "filesize", "width", "height", "mpixels", "ratio", "tagcount", "name", "path", "random", "pool"],
         _ => &[],
     }
 }
@@ -683,10 +717,12 @@ fn parse_order(v: &str) -> Result<Order, String> {
         "name" => OrderKey::Name,
         "path" => OrderKey::Path,
         "random" => OrderKey::Random,
+        "pool" => OrderKey::Pool,
         _ => return Err(format!("unknown order `{name}`; try {}", metatag_values("order").join(", "))),
     };
-    // Names and paths read A→Z; everything else largest or newest first.
-    let natural_desc = !matches!(key, OrderKey::Name | OrderKey::Path);
+    // Names, paths and pool pages read A→Z / first to last; everything else largest or newest
+    // first.
+    let natural_desc = !matches!(key, OrderKey::Name | OrderKey::Path | OrderKey::Pool);
     let descending = explicit.unwrap_or(natural_desc) != reverse;
     Ok(Order { key, descending })
 }
@@ -801,6 +837,12 @@ mod tests {
         assert_eq!(one("parent:none"), TermKind::Parent(ParentMatch::None));
         assert_eq!(one("parent:3FA9"), TermKind::Parent(ParentMatch::Of("3fa9".into())));
         assert_eq!(one("child:any"), TermKind::Child(true));
+        assert_eq!(one("pool:My_Comic"), TermKind::Pool(PoolMatch::Name("my_comic".into())));
+        assert_eq!(one("pool:trip*"), TermKind::Pool(PoolMatch::Glob("trip*".into())));
+        assert_eq!(Query::parse("cat pool:comic").unwrap().pool_order(), Some("comic"));
+        assert_eq!(Query::parse("pool:comic order:-pool").unwrap().pool_order(), Some("comic"));
+        assert_eq!(Query::parse("pool:comic order:date").unwrap().pool_order(), None);
+        assert_eq!(Query::parse("-pool:comic").unwrap().pool_order(), None);
         assert!(Query::parse("parent:xyz").is_err() && Query::parse("child:maybe").is_err());
         assert_eq!(one("path:\"Holiday 2023\""), TermKind::Path(TextMatch::Contains("holiday 2023".into())));
         assert_eq!(one("path:*/2023/*"), TermKind::Path(TextMatch::Glob("*/2023/*".into())));

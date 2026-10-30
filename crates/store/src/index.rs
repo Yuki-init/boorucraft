@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use boorucraft_core::{DateField, Mode, NumField, Order, OrderKey, ParentMatch, Query, Rating, TagPattern, TermKind, glob_match};
+use boorucraft_core::{DateField, Mode, NumField, OrderKey, ParentMatch, PoolMatch, Query, Rating, TagPattern, TermKind, glob_match};
 use chrono::{DateTime, Utc};
 use roaring::RoaringBitmap;
 
@@ -45,6 +45,7 @@ pub struct Row {
     paths: Vec<String>,
     source: Option<String>,
     parent: Option<String>,
+    pools: Vec<(String, u32)>,
 }
 
 impl Row {
@@ -68,6 +69,7 @@ impl Row {
             paths,
             source: e.source.as_ref().map(|s| s.to_lowercase()),
             parent: e.parent.as_ref().map(|p| p.to_lowercase()),
+            pools: e.pools.iter().map(|(p, n)| (p.clone(), *n)).collect(),
         }
     }
 
@@ -115,6 +117,10 @@ impl Row {
             TermKind::Parent(ParentMatch::Any) => self.parent.is_some(),
             TermKind::Parent(ParentMatch::Of(p)) => self.hash.starts_with(p.as_str()) || self.parent.as_deref().is_some_and(|x| x.starts_with(p.as_str())),
             TermKind::Child(want) => links.parents.contains(&self.hash) == *want,
+            TermKind::Pool(PoolMatch::None) => self.pools.is_empty(),
+            TermKind::Pool(PoolMatch::Any) => !self.pools.is_empty(),
+            TermKind::Pool(PoolMatch::Name(n)) => self.pools.iter().any(|(p, _)| p == n),
+            TermKind::Pool(PoolMatch::Glob(g)) => self.pools.iter().any(|(p, _)| glob_match(g, p)),
             TermKind::Path(m) => self.paths.iter().any(|p| m.matches(p)),
             TermKind::Md5(m) => self.md5 == *m,
             TermKind::Hash(prefix) => self.hash.starts_with(prefix.as_str()),
@@ -122,14 +128,32 @@ impl Row {
             TermKind::Source(Some(m)) => self.source.as_deref().is_some_and(|s| m.matches(s)),
         }
     }
+
+    /// Position in a pool.
+    pub fn pool_position(&self, pool: &str) -> Option<u32> {
+        self.pools.iter().find(|(p, _)| p == pool).map(|(_, n)| *n)
+    }
 }
 
 /// Sorts search results; the same order whichever collections they come from.
 ///
-/// `None` (no `order:`) is newest imported first. Files without the value (no width, say) go
-/// last either way. Ties fall back to newest imported, then the hash, so the order is stable.
-pub fn compare_rows(order: Option<&Order>, seed: u64, a: &Row, b: &Row) -> Ordering {
+/// A search for one pool (`pool:name`, no other `order:`) follows the pool's order. Otherwise
+/// no `order:` is newest imported first. Files without the value (no width, say) go last
+/// either way. Ties fall back to newest imported, then the hash, so the order is stable.
+pub fn compare_rows(query: &Query, a: &Row, b: &Row) -> Ordering {
     let default = || b.imported.cmp(&a.imported).then_with(|| a.hash.cmp(&b.hash));
+    if let Some(pool) = query.pool_order() {
+        let reverse = query.order.is_some_and(|o| o.descending);
+        let by_pos = match (a.pool_position(pool), b.pool_position(pool)) {
+            (Some(x), Some(y)) if reverse => y.cmp(&x),
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        return by_pos.then_with(|| a.hash.cmp(&b.hash));
+    }
+    let (order, seed) = (query.order.as_ref(), query.seed);
     let Some(order) = order else { return default() };
     let dir = |o: Ordering| if order.descending { o.reverse() } else { o };
     let nums = |field| match (a.number(field), b.number(field)) {
@@ -150,6 +174,8 @@ pub fn compare_rows(order: Option<&Order>, seed: u64, a: &Row, b: &Row) -> Order
         OrderKey::Name => dir(a.name.cmp(&b.name).then_with(|| a.paths.cmp(&b.paths))),
         OrderKey::Path => dir(a.paths.cmp(&b.paths)),
         OrderKey::Random => shuffle_key(seed, &a.hash).cmp(&shuffle_key(seed, &b.hash)),
+        // `order:pool` without a `pool:` term: nothing to follow.
+        OrderKey::Pool => Ordering::Equal,
     };
     first.then_with(default)
 }
@@ -267,7 +293,7 @@ impl SearchIndex {
     /// Hashes of the matching files in the query's order (default: newest imported first).
     pub fn search_at(&self, query: &Query, now: DateTime<Utc>, links: &Links) -> Vec<&str> {
         let mut rows = self.matching_rows(query, now, links);
-        rows.sort_by(|a, b| compare_rows(query.order.as_ref(), query.seed, a, b));
+        rows.sort_by(|a, b| compare_rows(query, a, b));
         rows.into_iter().map(|r| r.hash.as_str()).collect()
     }
 
@@ -358,6 +384,12 @@ mod tests {
             if f.hash == "b2b2" {
                 e.parent = Some("a1a1".into());
             }
+            // Pool "trip": c3 is page 1, a1 page 2, e5 page 7.
+            for (h, n) in [("c3c3", 1), ("a1a1", 2), ("e5e5", 7)] {
+                if f.hash == h {
+                    e.pools.insert("trip".into(), n);
+                }
+            }
             e.paths.insert(f.path.into());
             c.insert(f.hash.into(), e);
         }
@@ -425,6 +457,11 @@ mod tests {
         assert_eq!(search(&i, "parent:any"), vec!["b2b2"]);
         assert_eq!(search(&i, "child:yes"), vec!["a1a1"]);
         assert_eq!(search(&i, "~parent:any ~child:yes"), vec!["b2b2", "a1a1"], "the whole family");
+        assert_eq!(search(&i, "pool:trip"), vec!["c3c3", "a1a1", "e5e5"], "in pool order");
+        assert_eq!(search(&i, "pool:trip order:-pool"), vec!["e5e5", "a1a1", "c3c3"]);
+        assert_eq!(search(&i, "pool:trip order:filesize"), vec!["e5e5", "a1a1", "c3c3"]);
+        assert_eq!(search(&i, "pool:tr* sky"), vec!["c3c3", "a1a1"]);
+        assert_eq!(search(&i, "pool:none"), vec!["d4d4", "b2b2"]);
     }
 
     #[test]

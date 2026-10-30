@@ -106,6 +106,9 @@ pub struct FileEntry {
     /// parent may be in another collection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// Pools this file is in, with its position in each (1, 2, 3…; gaps are fine).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pools: BTreeMap<String, u32>,
 }
 
 impl FileEntry {
@@ -129,6 +132,7 @@ impl FileEntry {
             dhash: None,
             missing: false,
             parent: None,
+            pools: BTreeMap::new(),
         }
     }
 }
@@ -365,8 +369,17 @@ impl Collection {
                     HistoryOp::Delete { tag } => {
                         entry.tags.remove(tag);
                     }
+                    HistoryOp::RenamePool { from, to } => {
+                        if let Some(pos) = entry.pools.remove(from) {
+                            entry.pools.insert(to.clone(), pos);
+                        }
+                    }
+                    HistoryOp::DeletePool { pool } => {
+                        entry.pools.remove(pool);
+                    }
                 }
             }
+            // Only tag changes touch sidecars; pools live in collection.json alone.
             if entry.tags != before {
                 changed.insert(hash.clone());
             }
