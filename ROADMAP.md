@@ -80,3 +80,6 @@ finds and reviews near-duplicates, and groups files into pools and families of v
 - 2026-10-30 — M3.5: stacks: each pool and family shows as one tile (first page / top parent)
   with a count badge; double-click opens it, Backspace or "← Back" returns; toggle in the top
   bar. M3 done.
+- 2026-10-30 — M3.6: fixes from a 100-post Safebooru test copy: tags may start with `:` (booru
+  face tags like `:d`, `:3`; a trailing `:` is still refused), and `boorucraft-cli` no longer
+  panics when its output pipe closes early (`info DIR | head`); it finishes quietly instead.

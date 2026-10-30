@@ -23,7 +23,7 @@ pub enum TagError {
     Wildcard(String),
     #[error("tag `{0}` contains a control character")]
     Control(String),
-    #[error("tag `{0}` can't start or end with `:`")]
+    #[error("tag `{0}` can't end with `:` (or be just `:`)")]
     Colon(String),
 }
 
@@ -47,7 +47,10 @@ pub fn normalize_tag(input: &str) -> Result<String, TagError> {
     if tag.chars().any(char::is_control) {
         return Err(TagError::Control(tag));
     }
-    if tag.starts_with(':') || tag.ends_with(':') {
+    // A leading `:` is fine: booru face tags like `:d`, `:3` and `:<` are common, and a search
+    // only reads `name:value` as a filter when `name` is a metatag. A trailing one is almost
+    // always a half-typed namespace (`artist:`).
+    if tag.ends_with(':') {
         return Err(TagError::Colon(tag));
     }
     Ok(tag)
@@ -65,7 +68,7 @@ pub fn is_valid_namespace(name: &str) -> bool {
 /// returns `(None, tag)`.
 pub fn split_namespace(tag: &str, is_namespace: impl Fn(&str) -> bool) -> (Option<&str>, &str) {
     match tag.split_once(':') {
-        Some((ns, name)) if !name.is_empty() && is_namespace(ns) => (Some(ns), name),
+        Some((ns, name)) if !ns.is_empty() && !name.is_empty() && is_namespace(ns) => (Some(ns), name),
         _ => (None, tag),
     }
 }
@@ -100,6 +103,11 @@ mod tests {
         assert_eq!(normalize_tag("  Blue  Sky ").unwrap(), "blue_sky");
         assert_eq!(normalize_tag("Artist:Foo").unwrap(), "artist:foo");
         assert_eq!(normalize_tag("ÉCOLE").unwrap(), "école");
+        // Booru face tags.
+        for face in [":d", ":3", ":<", ":t", ">:)", ":p"] {
+            assert_eq!(normalize_tag(face).unwrap(), face.to_lowercase());
+        }
+        assert_eq!(normalize_tag(":D").unwrap(), ":d");
     }
 
     #[test]
@@ -109,8 +117,9 @@ mod tests {
         assert!(matches!(normalize_tag("~cat"), Err(TagError::BadStart(_))));
         assert!(matches!(normalize_tag("ca*t"), Err(TagError::Wildcard(_))));
         assert!(matches!(normalize_tag("ca\u{7}t"), Err(TagError::Control(_))));
-        assert!(matches!(normalize_tag(":cat"), Err(TagError::Colon(_))));
         assert!(matches!(normalize_tag("cat:"), Err(TagError::Colon(_))));
+        assert!(matches!(normalize_tag(":"), Err(TagError::Colon(_))));
+        assert!(matches!(normalize_tag("::"), Err(TagError::Colon(_))));
         assert_eq!(normalize_tag(&"a".repeat(MAX_TAG_LEN + 1)), Err(TagError::TooLong));
     }
 
@@ -124,6 +133,7 @@ mod tests {
         assert_eq!(split_namespace("artist:foo", ns), (Some("artist"), "foo"));
         assert_eq!(split_namespace("re:zero", ns), (None, "re:zero"));
         assert_eq!(split_namespace("cat", ns), (None, "cat"));
+        assert_eq!(split_namespace(":d", |_| true), (None, ":d"), "an empty namespace is never one");
     }
 
     #[test]

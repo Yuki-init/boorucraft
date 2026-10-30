@@ -764,6 +764,9 @@ mod tests {
             vec![(Mode::Must, tag("cat")), (Mode::Not, tag("dog")), (Mode::Any, tag("sky")), (Mode::Any, tag("sea")), (Mode::Must, tag("artist:foo")),]
         );
         assert!(Query::parse("   ").unwrap().is_empty());
+        // Booru face tags start with `:`; only a metatag name before the `:` makes a filter.
+        assert_eq!(kinds(":D -:3 ~:t"), vec![(Mode::Must, tag(":d")), (Mode::Not, tag(":3")), (Mode::Any, tag(":t"))]);
+        assert!(Query::parse("cat:").is_err());
     }
 
     #[test]

@@ -122,6 +122,43 @@ fn info_and_unknown_tags() {
     assert!(e.fails(&["bogus"]).contains("usage"));
 }
 
+#[test]
+fn booru_face_tags() {
+    let e = Env::new();
+    let (dir, a) = (e.dir(), e.file("a.png"));
+    e.ok(&["scan", dir]);
+    e.ok(&["tag", dir, &a, ":d", ":3", "smile", "--create"]);
+    assert!(e.read("a.png.xmp").contains("<rdf:li>:d</rdf:li>"));
+    assert_eq!(names(&e.ok(&["search", dir, ":d"])), vec!["a.png"]);
+    assert_eq!(names(&e.ok(&["search", dir, "-:3"])), vec!["b.png"]);
+    assert!(e.fails(&["tag", dir, &a, "cat:", "--create"]).contains("can't end with `:`"));
+}
+
+/// Regression: `boorucraft-cli info DIR | head` panicked once `head` closed the pipe. The command
+/// must finish (and save) quietly instead.
+#[test]
+fn closed_output_pipes_are_not_a_crash() {
+    use std::process::Stdio;
+    let e = Env::new();
+    for args in [vec!["scan", e.dir()], vec!["info", e.dir()], vec!["tags"]] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_boorucraft-cli"))
+            .args(&args)
+            .env("BOORUCRAFT_CONFIG_DIR", e.home.path().join("config"))
+            .env("BOORUCRAFT_CACHE_DIR", e.home.path().join("cache"))
+            .env_remove("BOORUCRAFT_TAGS")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Close the reading ends before the program writes anything.
+        drop(child.stdout.take());
+        drop(child.stderr.take());
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{args:?} exited with {status}");
+    }
+    assert!(e.read("collection.json").contains("boorucraft-collection"), "scan still saved");
+}
+
 /// A real picture, `w` pixels wide: blocks of different shades and a bright disc at `x` (0..1).
 fn picture(path: &Path, w: u32, x: f32) {
     let h = w * 2 / 3;

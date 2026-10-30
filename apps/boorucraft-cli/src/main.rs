@@ -2,8 +2,10 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use boorucraft_core::{Query, Rating};
 use boorucraft_index::{ScanCache, SidecarReport, find_groups, needing_hashes, scan, set_hashes, write_sidecars};
@@ -41,12 +43,38 @@ Searches: cat sky (both)  -dog (not)  ~cat ~dog (either)  cat* (wildcard)
   order:date  order:-filesize  order:name  order:random  (default: newest imported first)
 Environment: BOORUCRAFT_TAGS (tag list file), BOORUCRAFT_CONFIG_DIR, BOORUCRAFT_CACHE_DIR";
 
+/// Set once a reader closes stdout or stderr (e.g. `boorucraft-cli info DIR | head`): from then
+/// on output to it is dropped. `println!` would panic instead, and the command must still finish
+/// (a `tag` that prints and then saves has to save).
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+static STDERR_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// `println!` that never panics.
+macro_rules! out {
+    ($($arg:tt)*) => { write_line(&mut std::io::stdout().lock(), &STDOUT_CLOSED, format_args!($($arg)*)) };
+}
+
+/// `eprintln!` that never panics.
+macro_rules! err {
+    ($($arg:tt)*) => { write_line(&mut std::io::stderr().lock(), &STDERR_CLOSED, format_args!($($arg)*)) };
+}
+
+/// Writes one line; any write error (normally a closed pipe) stops all later output to `w`.
+fn write_line(w: &mut impl Write, closed: &AtomicBool, args: std::fmt::Arguments) {
+    if closed.load(Ordering::Relaxed) {
+        return;
+    }
+    if writeln!(w, "{args}").and_then(|()| w.flush()).is_err() {
+        closed.store(true, Ordering::Relaxed);
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            err!("error: {e}");
             ExitCode::FAILURE
         }
     }
@@ -67,7 +95,7 @@ fn run(args: &[String]) -> Res {
         ["tags", rest @ ..] => cmd_tags(rest),
         ["pools", rest @ ..] => cmd_pools(rest),
         ["help" | "--help" | "-h"] => {
-            println!("{USAGE}");
+            out!("{USAGE}");
             Ok(())
         }
         _ => Err(format!("unrecognised command\n\n{USAGE}")),
@@ -90,7 +118,7 @@ fn open_collection(dir: &Path, write: bool, tags: &TagList) -> Res<(Collection, 
     let mut cache = ScanCache::load(&paths::cache_dir(), c.root());
     let changed = c.apply_tag_history(tags);
     if write && !changed.is_empty() {
-        eprintln!("updated {} file(s) for tag renames, merges and deletes", changed.len());
+        err!("updated {} file(s) for tag renames, merges and deletes", changed.len());
         let mut report = SidecarReport::default();
         write_sidecars(&c, tags, changed.iter().map(String::as_str), &mut cache, &mut report);
         print_errors(&report.errors);
@@ -101,14 +129,14 @@ fn open_collection(dir: &Path, write: bool, tags: &TagList) -> Res<(Collection, 
 fn save(c: &mut Collection, cache: &ScanCache) -> Res {
     c.save().map_err(err)?;
     if let Err(e) = cache.save() {
-        eprintln!("warning: couldn't save the scan cache: {e}");
+        err!("warning: couldn't save the scan cache: {e}");
     }
     Ok(())
 }
 
 fn print_errors(errors: &[(PathBuf, String)]) {
     for (p, e) in errors {
-        eprintln!("  {}: {e}", p.display());
+        err!("  {}: {e}", p.display());
     }
 }
 
@@ -117,18 +145,25 @@ fn cmd_scan(dir: &Path) -> Res {
     let (mut c, mut cache) = open_collection(dir, true, &tags)?;
     let r = scan(&mut c, &tags, &mut cache);
     save(&mut c, &cache)?;
-    println!(
+    out!(
         "{} files ({} hashed): {} new, {} moved or copied, {} edited, {} missing; sidecars: {} read back, {} written",
-        r.files, r.hashed, r.added, r.moved, r.edited, r.missing, r.sidecars.read, r.sidecars.written
+        r.files,
+        r.hashed,
+        r.added,
+        r.moved,
+        r.edited,
+        r.missing,
+        r.sidecars.read,
+        r.sidecars.written
     );
     if !r.errors.is_empty() || !r.sidecars.errors.is_empty() {
-        eprintln!("{} problem(s):", r.errors.len() + r.sidecars.errors.len());
+        err!("{} problem(s):", r.errors.len() + r.sidecars.errors.len());
         print_errors(&r.errors);
         print_errors(&r.sidecars.errors);
     }
     let unknown = c.unknown_tags(&tags);
     if !unknown.is_empty() {
-        eprintln!("{} tag(s) aren't in the tag list; see `boorucraft-cli unknown {}`", unknown.len(), dir.display());
+        err!("{} tag(s) aren't in the tag list; see `boorucraft-cli unknown {}`", unknown.len(), dir.display());
     }
     Ok(())
 }
@@ -150,12 +185,12 @@ fn cmd_search(dir: &Path, query: &str) -> Res {
         let Some(rel) = e.paths.first() else { continue };
         let shown = c.abs_path(rel).map_or_else(|| rel.clone(), |p| p.display().to_string());
         if e.missing {
-            println!("{shown}  [missing]");
+            out!("{shown}  [missing]");
         } else {
-            println!("{shown}");
+            out!("{shown}");
         }
     }
-    eprintln!("{} of {} file(s)", hits.len(), index.len());
+    err!("{} of {} file(s)", hits.len(), index.len());
     Ok(())
 }
 
@@ -194,12 +229,12 @@ fn cmd_dupes(rest: &[&str]) -> Res {
         let (mut c, cache) = open_collection(dir, true, &tags)?;
         let todo: Vec<_> = needing_hashes(&c).into_iter().filter(|(_, _, f)| boorucraft_thumbs::can_decode(f)).collect();
         if !todo.is_empty() {
-            eprintln!("{}: hashing {} picture(s)…", dir.display(), todo.len());
+            err!("{}: hashing {} picture(s)…", dir.display(), todo.len());
             let results: Vec<_> = todo.par_iter().map(|(hash, path, format)| (hash, path, thumbs.thumbnail_and_hashes(hash, path, format))).collect();
             for (hash, path, r) in results {
                 match r {
                     Ok((_, h)) => set_hashes(&mut c, hash, h),
-                    Err(e) => eprintln!("  {}: {e}", path.display()),
+                    Err(e) => err!("  {}: {e}", path.display()),
                 }
             }
             save(&mut c, &cache)?;
@@ -209,7 +244,7 @@ fn cmd_dupes(rest: &[&str]) -> Res {
     let refs: Vec<Option<&Collection>> = colls.iter().map(Some).collect();
     let groups = find_groups(&refs, threshold);
     for (n, g) in groups.iter().enumerate() {
-        println!("group {} ({} files)", n + 1, g.len());
+        out!("group {} ({} files)", n + 1, g.len());
         for (ci, hash) in g {
             let Some(c) = colls.get(*ci) else { continue };
             let Some(e) = c.get(hash) else { continue };
@@ -218,10 +253,10 @@ fn cmd_dupes(rest: &[&str]) -> Res {
                 (Some(w), Some(h)) => format!("{w}x{h}, "),
                 _ => String::new(),
             };
-            println!("  {shown}  ({size}{} bytes)", e.size);
+            out!("  {shown}  ({size}{} bytes)", e.size);
         }
     }
-    eprintln!("{} group(s) of near-duplicates", groups.len());
+    err!("{} group(s) of near-duplicates", groups.len());
     Ok(())
 }
 
@@ -238,51 +273,51 @@ fn cmd_info(dir: &Path, file: Option<&Path>) -> Res {
         let index = SearchIndex::build(&c);
         let missing = c.files().filter(|(_, e)| e.missing).count();
         let untagged = c.files().filter(|(_, e)| e.tags.is_empty()).count();
-        println!("{}", c.root().display());
-        println!("  files: {} ({missing} missing, {untagged} untagged)", c.len());
+        out!("{}", c.root().display());
+        out!("  files: {} ({missing} missing, {untagged} untagged)", c.len());
         for (r, n) in index.rating_counts() {
-            println!("  {r}: {n}");
+            out!("  {r}: {n}");
         }
-        println!("  top tags:");
+        out!("  top tags:");
         for (t, n) in index.tag_counts().into_iter().take(20) {
-            println!("    {n:>6}  {t}");
+            out!("    {n:>6}  {t}");
         }
         return Ok(());
     };
     let hash = find_file(&c, file)?;
     let e = c.get(&hash).ok_or("file vanished")?;
-    println!("sha256:   {hash}");
-    println!("md5:      {}", e.md5);
+    out!("sha256:   {hash}");
+    out!("md5:      {}", e.md5);
     for p in &e.paths {
-        println!("path:     {p}");
+        out!("path:     {p}");
     }
-    println!("kind:     {:?}, {}{}", e.kind, e.format, if e.animated { ", animated" } else { "" });
+    out!("kind:     {:?}, {}{}", e.kind, e.format, if e.animated { ", animated" } else { "" });
     if let (Some(w), Some(h)) = (e.width, e.height) {
-        println!("size:     {w}x{h}, {} bytes", e.size);
+        out!("size:     {w}x{h}, {} bytes", e.size);
     } else {
-        println!("size:     {} bytes", e.size);
+        out!("size:     {} bytes", e.size);
     }
     if let Some(t) = e.taken {
-        println!("taken:    {t}");
+        out!("taken:    {t}");
     }
-    println!("imported: {}", e.imported);
-    println!("rating:   {}", e.rating.map_or_else(|| "-".to_string(), |r| r.to_string()));
+    out!("imported: {}", e.imported);
+    out!("rating:   {}", e.rating.map_or_else(|| "-".to_string(), |r| r.to_string()));
     if let Some(s) = &e.source {
-        println!("source:   {s}");
+        out!("source:   {s}");
     }
     let tag_names: Vec<String> = e.tags.iter().map(|t| if tags.contains(t) { t.clone() } else { format!("{t} (unknown)") }).collect();
-    println!("tags:     {}", tag_names.join(" "));
+    out!("tags:     {}", tag_names.join(" "));
     if let Some(p) = &e.parent {
         let shown = c.get(p).and_then(|pe| pe.paths.first().cloned()).map_or_else(|| p.clone(), |path| format!("{path} ({p})"));
-        println!("parent:   {shown}");
+        out!("parent:   {shown}");
     }
     let children: Vec<&str> =
         c.files().filter(|(_, x)| x.parent.as_deref() == Some(hash.as_str())).filter_map(|(_, x)| x.paths.first().map(String::as_str)).collect();
     if !children.is_empty() {
-        println!("children: {}", children.join(", "));
+        out!("children: {}", children.join(", "));
     }
     if e.missing {
-        println!("missing:  yes");
+        out!("missing:  yes");
     }
     Ok(())
 }
@@ -322,7 +357,7 @@ fn cmd_tag(dir: &Path, file: &Path, rest: &[&str]) -> Res {
     if create {
         for t in &add {
             match tags.create(t, "") {
-                Ok(name) => eprintln!("created tag `{name}`"),
+                Ok(name) => err!("created tag `{name}`"),
                 Err(StoreError::TagExists(_)) => {}
                 Err(e) => return Err(err(e)),
             }
@@ -367,10 +402,10 @@ fn cmd_tag(dir: &Path, file: &Path, rest: &[&str]) -> Res {
     write_sidecars(&c, &tags, [hash.as_str()], &mut cache, &mut report);
     print_errors(&report.errors);
     if let Err(e) = cache.save() {
-        eprintln!("warning: couldn't save the scan cache: {e}");
+        err!("warning: couldn't save the scan cache: {e}");
     }
     let e = c.get(&hash).ok_or("file vanished")?;
-    println!("{}: {}", file.display(), e.tags.iter().cloned().collect::<Vec<_>>().join(" "));
+    out!("{}: {}", file.display(), e.tags.iter().cloned().collect::<Vec<_>>().join(" "));
     Ok(())
 }
 
@@ -393,12 +428,12 @@ fn cmd_unknown(dir: &Path) -> Res {
     let (c, _) = open_collection(dir, false, &tags)?;
     let unknown = c.unknown_tags(&tags);
     if unknown.is_empty() {
-        eprintln!("every tag in this collection is in the tag list");
+        err!("every tag in this collection is in the tag list");
     }
     for (t, n) in unknown {
         let hint = tags.suggest(&t, 3);
         let hint = if hint.is_empty() { String::new() } else { format!("  (similar: {})", hint.join(", ")) };
-        println!("{n:>6}  {t}{hint}");
+        out!("{n:>6}  {t}{hint}");
     }
     Ok(())
 }
@@ -409,9 +444,9 @@ fn cmd_pools(rest: &[&str]) -> Res {
             let tags = open_tags(false)?;
             for (p, info) in tags.pools() {
                 if info.description.is_empty() {
-                    println!("{p}");
+                    out!("{p}");
                 } else {
-                    println!("{p}  — {}", info.description);
+                    out!("{p}  — {}", info.description);
                 }
             }
             Ok(())
@@ -444,17 +479,17 @@ fn cmd_pools(rest: &[&str]) -> Res {
                 }
             }
             save(&mut c, &cache)?;
-            println!("{pool}: {} file(s) in this collection", order.len());
+            out!("{pool}: {} file(s) in this collection", order.len());
             Ok(())
         }
         [cmd, args @ ..] => {
             let mut tags = open_tags(true)?;
             match (*cmd, args) {
-                ("create", [name]) => println!("created pool `{}`", tags.create_pool(name, "").map_err(err)?),
-                ("rename", [from, to]) => println!("renamed to `{}`; collections update when next opened", tags.rename_pool(from, to).map_err(err)?),
+                ("create", [name]) => out!("created pool `{}`", tags.create_pool(name, "").map_err(err)?),
+                ("rename", [from, to]) => out!("renamed to `{}`; collections update when next opened", tags.rename_pool(from, to).map_err(err)?),
                 ("delete", [name]) => {
                     tags.delete_pool(name).map_err(err)?;
-                    println!("deleted; collections update when next opened (the files stay)");
+                    out!("deleted; collections update when next opened (the files stay)");
                 }
                 _ => return Err(format!("unrecognised pools command\n\n{USAGE}")),
             }
@@ -471,7 +506,7 @@ fn cmd_tags(rest: &[&str]) -> Res {
         ["namespaces"] => {
             let tags = open_tags(false)?;
             for (n, info) in tags.namespaces() {
-                println!("{n}  {}", info.color);
+                out!("{n}  {}", info.color);
             }
             Ok(())
         }
@@ -480,12 +515,12 @@ fn cmd_tags(rest: &[&str]) -> Res {
             let prefix = rest.first().map(|p| p.to_lowercase()).unwrap_or_default();
             for (t, info) in tags.tags().filter(|(t, _)| t.starts_with(&prefix)) {
                 if info.description.is_empty() {
-                    println!("{t}");
+                    out!("{t}");
                 } else {
-                    println!("{t}  — {}", info.description);
+                    out!("{t}  — {}", info.description);
                 }
             }
-            eprintln!("{} tag(s) in {}", tags.len(), tags.path().display());
+            err!("{} tag(s) in {}", tags.len(), tags.path().display());
             Ok(())
         }
         [] => Ok(()),
@@ -495,23 +530,23 @@ fn cmd_tags(rest: &[&str]) -> Res {
                 ("create", names) if !names.is_empty() => {
                     for n in names {
                         let name = tags.create(n, "").map_err(err)?;
-                        println!("created `{name}`");
+                        out!("created `{name}`");
                     }
                 }
                 ("describe", [tag, text @ ..]) => tags.set_description(&tags.resolve(tag).map_err(err)?, &text.join(" ")).map_err(err)?,
                 ("rename", [from, to]) => {
                     let to = tags.rename(from, to).map_err(err)?;
-                    println!("renamed to `{to}`; collections update when next opened");
+                    out!("renamed to `{to}`; collections update when next opened");
                 }
                 ("merge", [into, from @ ..]) if !from.is_empty() => {
                     tags.merge(from, into).map_err(err)?;
-                    println!("merged into `{into}`; collections update when next opened");
+                    out!("merged into `{into}`; collections update when next opened");
                 }
                 ("delete", names) if !names.is_empty() => {
                     for n in names {
                         tags.delete(n).map_err(err)?;
                     }
-                    println!("deleted; collections update when next opened");
+                    out!("deleted; collections update when next opened");
                 }
                 ("add-namespace", [name]) => tags.add_namespace(name, "").map_err(err)?,
                 ("add-namespace", [name, color]) => tags.add_namespace(name, color).map_err(err)?,
