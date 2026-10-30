@@ -5,6 +5,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
+mod dupes_view;
 pub mod fonts;
 pub mod library;
 pub mod selection;
@@ -12,7 +13,7 @@ pub mod suggest;
 pub mod thumbnails;
 pub mod viewer;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +34,13 @@ const ACCENT: Color32 = Color32::from_rgb(90, 150, 240);
 /// Most tags listed in the sidebar.
 const MAX_SIDEBAR_TAGS: usize = 300;
 
+/// What the central area shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Grid,
+    Duplicates,
+}
+
 /// Start-up options (from the command line).
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -48,6 +56,8 @@ pub struct Options {
     pub screenshot_after: Duration,
     /// Put the keyboard focus here at start-up: `search` or `tags`.
     pub focus: Option<String>,
+    /// Start on the Duplicates screen.
+    pub duplicates: bool,
 }
 
 pub struct App {
@@ -72,6 +82,10 @@ pub struct App {
     startup_done: bool,
     ready_at: Option<Instant>,
     screenshot_requested: bool,
+    screen: Screen,
+    /// The copy to keep in each duplicate group, by the group's first hash (default: the best).
+    dupe_keep: HashMap<String, Hit>,
+    confirm_trash: Option<dupes_view::TrashPlan>,
 }
 
 impl App {
@@ -89,6 +103,7 @@ impl App {
         let lib = Library::new(dirs.clone(), config, options.collections.clone(), Arc::new(move || waker_ctx.request_repaint()));
         let thumbs = Thumbnails::new(ThumbCache::new(&dirs.cache), ctx);
         let query = options.query.clone().unwrap_or_default();
+        let screen = if options.duplicates { Screen::Duplicates } else { Screen::Grid };
         App {
             lib,
             thumbs,
@@ -108,6 +123,9 @@ impl App {
             startup_done: false,
             ready_at: None,
             screenshot_requested: false,
+            screen,
+            dupe_keep: HashMap::new(),
+            confirm_trash: None,
         }
     }
 
@@ -176,6 +194,17 @@ impl App {
                             mem.surrender_focus(id);
                         }
                     });
+                }
+                continue;
+            }
+            if self.screen == Screen::Duplicates && self.viewer.is_none() {
+                match key {
+                    Key::Escape => self.screen = Screen::Grid,
+                    Key::Slash => {
+                        self.screen = Screen::Grid;
+                        self.focus = Some(SEARCH_ID);
+                    }
+                    _ => {}
                 }
                 continue;
             }
@@ -256,7 +285,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let count = format!("{} results", self.lib.hits.len());
-            let right_width = 330.0;
+            let right_width = 450.0;
             let width = (ui.available_width() - right_width).max(160.0);
             let bad = self.lib.query_error.is_some();
             let err_span = self.lib.query_error.as_ref().map(|(_, s)| s.clone());
@@ -284,6 +313,13 @@ impl App {
             }
             ui.label(RichText::new(count).color(Color32::from_gray(170)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let groups = self.lib.dupe_groups.len();
+                let on = self.screen == Screen::Duplicates;
+                let label = if groups > 0 { format!("Duplicates ({groups})") } else { "Duplicates".to_string() };
+                if ui.selectable_label(on, label).on_hover_text("Review near-duplicate pictures").clicked() {
+                    self.screen = if on { Screen::Grid } else { Screen::Duplicates };
+                    self.viewer = None;
+                }
                 if ui.button("Add folder…").on_hover_text("Open a folder as a collection").clicked()
                     && let Some(dir) = rfd::FileDialog::new().set_title("Choose a picture folder").pick_folder()
                 {
@@ -803,6 +839,7 @@ impl eframe::App for App {
         }
         self.sel.clamp(self.lib.hits.len());
         self.lib.refresh_usage();
+        self.lib.refresh_dupes();
         self.thumbs.begin_frame(&ctx);
         self.handle_keys(&ctx);
 
@@ -819,9 +856,14 @@ impl eframe::App for App {
                 self.results_sidebar(ui);
             });
         }
-        egui::Panel::right("tags").resizable(true).default_size(300.0).min_size(220.0).max_size(480.0).show(ui, |ui| self.tag_panel(ui));
+        let dupes = self.screen == Screen::Duplicates && self.viewer.is_none();
+        if !dupes {
+            egui::Panel::right("tags").resizable(true).default_size(300.0).min_size(220.0).max_size(480.0).show(ui, |ui| self.tag_panel(ui));
+        }
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            if self.viewer.is_some() {
+            if dupes {
+                self.duplicates_screen(ui);
+            } else if self.viewer.is_some() {
                 self.viewer_bar(ui);
                 let view = ui.available_rect_before_wrap();
                 let format = self.viewer.as_ref().and_then(|v| self.lib.entry(&v.hit)).map(|e| e.format.clone()).unwrap_or_default();
@@ -836,6 +878,7 @@ impl eframe::App for App {
             }
         });
 
+        self.confirm_trash_dialog(&ctx);
         self.startup(&ctx);
         if let Some(wait) = self.lib.save_due() {
             ctx.request_repaint_after(wait);

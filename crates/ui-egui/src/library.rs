@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use boorucraft_core::{Query, Rating};
 use boorucraft_dedup::Hashes;
-use boorucraft_index::{ScanCache, ScanReport, SidecarReport, find_groups, needing_hashes, scan, set_hashes, write_sidecars};
+use boorucraft_index::{ScanCache, ScanReport, SidecarReport, find_groups, needing_hashes, scan, set_hashes, sidecar_rel, write_sidecars};
 use boorucraft_store::{Collection, FileEntry, Links, Row, SearchIndex, StoreError, TagList, compare_rows, paths, safefile};
 use boorucraft_thumbs::ThumbCache;
 use rayon::prelude::*;
@@ -67,6 +67,9 @@ impl Config {
         safefile::write_atomic(&path, &bytes, false).map(|_| ()).map_err(|e| e.to_string())
     }
 }
+
+/// Moves a file to the system trash (replaced in tests).
+pub type Trasher = Arc<dyn Fn(&Path) -> Result<(), String> + Send + Sync>;
 
 /// One search result: a file in one of the open collections.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -164,6 +167,8 @@ pub struct Library {
     scan_rx: Receiver<ScanDone>,
     /// Called when a background job finishes, to wake the UI.
     waker: Arc<dyn Fn() + Send + Sync>,
+    /// Moves files to the trash: the system trash in the app.
+    pub trasher: Trasher,
 }
 
 fn seed_now() -> u64 {
@@ -218,6 +223,7 @@ impl Library {
             scan_tx,
             scan_rx,
             waker,
+            trasher: Arc::new(|p: &Path| trash::delete(p).map_err(|e| e.to_string())),
         };
         for root in roots {
             lib.open_collection(&root, false);
@@ -448,6 +454,19 @@ impl Library {
         finished
     }
 
+    pub fn dupe_threshold(&self) -> u32 {
+        self.config.dupe_threshold.unwrap_or(boorucraft_dedup::DEFAULT_THRESHOLD).min(boorucraft_dedup::MAX_THRESHOLD)
+    }
+
+    /// Changes how alike pictures must be to count as duplicates (remembered in config.json).
+    pub fn set_dupe_threshold(&mut self, bits: u32) {
+        self.config.dupe_threshold = Some(bits.min(boorucraft_dedup::MAX_THRESHOLD));
+        self.dupes_stale = true;
+        if !self.session_only {
+            self.save_config();
+        }
+    }
+
     /// Works the duplicate groups out again if anything changed since.
     pub fn refresh_dupes(&mut self) {
         if !self.dupes_stale {
@@ -455,7 +474,7 @@ impl Library {
         }
         self.dupes_stale = false;
         let colls: Vec<Option<&Collection>> = self.colls.iter().map(OpenCollection::collection).collect();
-        let threshold = self.config.dupe_threshold.unwrap_or(boorucraft_dedup::DEFAULT_THRESHOLD);
+        let threshold = self.dupe_threshold();
         let groups = find_groups(&colls, threshold, |_, _| false);
         self.links.dupes = groups.iter().flatten().map(|(_, h)| h.clone()).collect();
         self.dupe_groups = groups.into_iter().map(|g| g.into_iter().map(|(coll, hash)| Hit { coll, hash }).collect()).collect();
@@ -665,6 +684,135 @@ impl Library {
         self.recount();
     }
 
+    /// Marks dirty without any sidecar to rewrite (hashes, duplicate decisions).
+    fn touch(&mut self, coll: usize) {
+        if let Some(oc) = self.colls.get_mut(coll) {
+            oc.dirty_since = Some(Instant::now());
+        }
+    }
+
+    /// Records that the files of a group aren't duplicates of each other, in every collection
+    /// involved, so the group doesn't come back.
+    pub fn mark_not_duplicates(&mut self, group: &[Hit]) {
+        let mut touched = BTreeSet::new();
+        for (i, a) in group.iter().enumerate() {
+            for b in group.iter().skip(i + 1) {
+                for coll in [a.coll, b.coll] {
+                    if let Some(oc) = self.colls.get_mut(coll)
+                        && let CollState::Ready { c, .. } = &mut oc.state
+                        && !c.is_read_only()
+                    {
+                        c.mark_not_duplicate(&a.hash, &b.hash);
+                        touched.insert(coll);
+                    }
+                }
+            }
+        }
+        for coll in touched {
+            self.touch(coll);
+        }
+        self.dupes_stale = true;
+    }
+
+    /// Copies the tags of `others` to `keep`; also their source and rating if `keep` has none
+    /// (the strictest rating wins). Returns whether `keep` changed.
+    pub fn merge_into(&mut self, keep: &Hit, others: &[Hit]) -> bool {
+        let mut tags = BTreeSet::new();
+        let mut rating: Option<Rating> = None;
+        let mut source = None;
+        for e in others.iter().filter(|h| *h != keep).filter_map(|h| self.entry(h)) {
+            tags.extend(e.tags.iter().cloned());
+            rating = stricter(rating, e.rating);
+            source = source.or_else(|| e.source.clone());
+        }
+        let mut changed = false;
+        self.edit_entries(std::slice::from_ref(keep), |e| {
+            let before = e.clone();
+            e.tags.extend(tags.iter().cloned());
+            if e.rating.is_none() {
+                e.rating = rating;
+            }
+            if e.source.is_none() {
+                e.source = source.clone();
+            }
+            changed = *e != before;
+            changed
+        });
+        changed
+    }
+
+    /// Moves files (every copy, and each one's sidecar) to the trash and forgets them. A file
+    /// whose copies can't all be trashed keeps the ones that are left. Returns how many files
+    /// were removed.
+    pub fn trash_files(&mut self, hits: &[Hit]) -> usize {
+        let trasher = Arc::clone(&self.trasher);
+        let mut removed = 0;
+        let mut errors = Vec::new();
+        let mut touched = BTreeSet::new();
+        for hit in hits {
+            let Some(oc) = self.colls.get_mut(hit.coll) else { continue };
+            let name = oc.name.clone();
+            let CollState::Ready { c, .. } = &mut oc.state else { continue };
+            if c.is_read_only() {
+                errors.push(format!("{name} is read-only"));
+                continue;
+            }
+            let mode = c.settings().sidecars;
+            let Some(paths) = c.get(&hit.hash).map(|e| e.paths.iter().cloned().collect::<Vec<_>>()) else { continue };
+            let mut gone = Vec::new();
+            for rel in &paths {
+                let Some(abs) = c.abs_path(rel) else { continue };
+                if abs.exists()
+                    && let Err(e) = trasher(&abs)
+                {
+                    errors.push(format!("{}: {e}", abs.display()));
+                    continue;
+                }
+                gone.push(rel.clone());
+                // The sidecar goes too, unless another file shares it (`cat.xmp` for `cat.jpg`
+                // and `cat.png`).
+                let Some(side) = sidecar_rel(rel, mode) else { continue };
+                let shared = c.files().any(|(h, e)| {
+                    e.paths.iter().any(|p| p != rel && (h != hit.hash || !paths.contains(p)) && sidecar_rel(p, mode).as_deref() == Some(side.as_str()))
+                });
+                if let Some(side_abs) = c.abs_path(&side)
+                    && side_abs.exists()
+                    && !shared
+                    && let Err(e) = trasher(&side_abs)
+                {
+                    errors.push(format!("{}: {e}", side_abs.display()));
+                }
+            }
+            if gone.len() == paths.len() {
+                c.remove(&hit.hash);
+                removed += 1;
+            } else if let Some(e) = c.get_mut(&hit.hash) {
+                for g in &gone {
+                    e.paths.remove(g);
+                }
+            }
+            touched.insert(hit.coll);
+        }
+        for coll in touched {
+            if let Some(oc) = self.colls.get_mut(coll)
+                && let CollState::Ready { c, .. } = &oc.state
+            {
+                oc.index = SearchIndex::build(c);
+            }
+            self.touch(coll);
+        }
+        let alive: Vec<bool> = self.hits.iter().map(|h| self.entry(h).is_some()).collect();
+        let mut alive = alive.into_iter();
+        self.hits.retain(|_| alive.next().unwrap_or(false));
+        self.usage = None;
+        self.dupes_stale = true;
+        self.recount();
+        if let Some(e) = errors.first() {
+            self.notify(format!("Couldn't move to the trash: {e}"));
+        }
+        removed
+    }
+
     /// Adds a tag to the central list. Returns its normalised name.
     pub fn create_tag(&mut self, name: &str) -> Option<String> {
         if self.tags.is_read_only() {
@@ -752,6 +900,14 @@ impl Library {
     }
 }
 
+/// The stricter of two ratings (explicit over questionable over safe).
+fn stricter(a: Option<Rating>, b: Option<Rating>) -> Option<Rating> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y.index() > x.index() { y } else { x }),
+        (x, y) => x.or(y),
+    }
+}
+
 impl Drop for Library {
     fn drop(&mut self) {
         if let Some(job) = &self.hash_job {
@@ -803,6 +959,57 @@ mod tests {
         assert_eq!(lib.hits.len(), 1);
         lib.flush_all();
         assert!(std::fs::read_to_string(two.join("collection.json")).unwrap().contains("\"phash\""), "hashes are saved");
+    }
+
+    #[test]
+    fn keeping_one_copy_trashes_the_others_and_keeps_their_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (pics, bin) = (tmp.path().join("pics"), tmp.path().join("bin"));
+        std::fs::create_dir_all(&pics).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        detailed(&pics.join("big.png"), 600, 0.3);
+        detailed(&pics.join("small.jpg"), 200, 0.3);
+        detailed(&pics.join("copy.png"), 300, 0.3);
+        detailed(&pics.join("x.png"), 600, 0.8);
+        detailed(&pics.join("y.jpg"), 300, 0.8);
+        let mut lib = library(tmp.path(), &pics);
+        let moved = bin.clone();
+        lib.trasher = Arc::new(move |p: &Path| std::fs::rename(p, moved.join(p.file_name().unwrap())).map_err(|e| e.to_string()));
+        lib.refresh_dupes();
+        assert_eq!(lib.dupe_groups.len(), 2);
+        let first = |lib: &Library, name: &str| lib.dupe_groups.iter().find(|g| lib.entry(&g[0]).unwrap().paths.contains(name)).cloned().unwrap();
+        let group = first(&lib, "big.png");
+        assert_eq!(group.len(), 3);
+
+        lib.create_tag("cat");
+        lib.create_tag("sky");
+        lib.edit_tags(&group[1..2], &["cat".into()], &[]);
+        lib.set_rating(&group[1..2], Some(Rating::Questionable));
+        lib.set_source(&group[2], Some("https://example.org/1".into()));
+        lib.edit_tags(&group[2..3], &["sky".into()], &[]);
+        lib.flush_all();
+        let trashed_name = lib.entry(&group[1]).unwrap().paths.iter().next().unwrap().clone();
+        assert!(pics.join(format!("{trashed_name}.xmp")).exists());
+
+        assert!(lib.merge_into(&group[0], &group[1..]));
+        assert_eq!(lib.trash_files(&group[1..]), 2);
+        let kept = lib.entry(&group[0]).unwrap();
+        assert_eq!(kept.tags, ["cat".to_string(), "sky".to_string()].into());
+        assert_eq!(kept.rating, Some(Rating::Questionable));
+        assert_eq!(kept.source.as_deref(), Some("https://example.org/1"));
+        assert!(pics.join("big.png").exists());
+        assert!(!pics.join(&trashed_name).exists() && bin.join(&trashed_name).exists(), "moved to the trash");
+        assert!(bin.join(format!("{trashed_name}.xmp")).exists(), "with its sidecar");
+        assert!(lib.entry(&group[1]).is_none());
+
+        // The other pair: not duplicates, and that is remembered.
+        let other = first(&lib, "x.png");
+        lib.mark_not_duplicates(&other);
+        lib.refresh_dupes();
+        assert!(lib.dupe_groups.is_empty());
+        lib.flush_all();
+        let json = std::fs::read_to_string(pics.join("collection.json")).unwrap();
+        assert!(json.contains("not_duplicates") && !json.contains(&trashed_name), "{json}");
     }
 
     fn library(tmp: &Path, pics: &Path) -> Library {

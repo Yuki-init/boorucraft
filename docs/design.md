@@ -44,8 +44,8 @@ every file has tags, and you find files by searching tags and other properties.
 
 Crates: `serde` + `serde_json`, `sha2`, `md-5`, `quick-xml`, `roaring`, `walkdir`, `rayon`,
 `imagesize`, `kamadak-exif`, `chrono`, `thiserror` (since M0); `eframe`/`egui` (wgpu), `image`
-(JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI), `jxl-oxide`, `open`, `rfd` (since M1); planned:
-`notify`, `trash`.
+(JPEG, PNG, GIF, WebP, BMP, TIFF, ICO, QOI), `jxl-oxide`, `open`, `rfd` (since M1); `trash` (since M3; on Linux it is plain Rust over the
+freedesktop.org trash folders); planned: `notify`.
 
 ## Workspace layout
 
@@ -327,10 +327,19 @@ their namespace colour; then metatag names with an example, and values after `ra
 - **When**: after scans finish, a background job hashes every decodable picture that has no
   hashes yet (status bar: "Looking for duplicates: n / total"). A picture that fails isn't
   retried until the next start. `boorucraft-cli dupes DIR…` does the same and prints the groups.
-- **Review screen**: groups shown side by side with resolution, size, format and paths.
-  Actions: keep the best one (move the others to the system trash with the `trash` crate, only
-  after confirmation), merge tags into the one kept, or mark "not duplicates" (saved in
-  `not_duplicates`).
+- **Review screen** ("Duplicates" in the top bar, or `--duplicates`): each group side by side
+  with resolution, file size, format, paths, tag count, rating and source; the best resolution
+  and size are bold. The best copy is chosen to keep; a click chooses another. Actions:
+  - **Keep this one, trash the others…**: a dialog lists what goes and, by default, first copies
+    their tags, rating and source to the kept file. Every copy of each file goes to the system
+    trash (`trash` crate) with its sidecar (unless another file shares it, as `cat.xmp` can in
+    Lightroom naming), and its entry leaves `collection.json`.
+  - **Copy tags to this one**: tags of the others are added; rating and source only if it has
+    none (the strictest rating wins).
+  - **Not duplicates**: every pair is saved in `not_duplicates` of each collection involved.
+  - **Show in grid**: searches `~hash:… ~hash:…` for the group.
+  - A slider sets the threshold (0–12 bits, saved in `config.json`).
+  At most 200 groups are drawn at once.
 
 ## UI
 

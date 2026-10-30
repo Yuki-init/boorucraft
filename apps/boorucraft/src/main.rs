@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N]
-//!            [--focus search|tags] [--screenshot OUT.png [--after SECONDS]] [--size WxH]
+//!            [--focus search|tags] [--duplicates] [--screenshot OUT.png [--after SECONDS]] [--size WxH]
 //! ```
 //!
 //! `--collection` opens folders for this session only (they aren't remembered).
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use boorucraft_ui_egui::{App, Options};
 
-const USAGE: &str = "usage: boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N] [--focus search|tags] [--screenshot OUT.png [--after SECONDS]] [--size WxH]";
+const USAGE: &str = "usage: boorucraft [--collection DIR]... [--query Q] [--select N]... [--view N] [--focus search|tags] [--duplicates] [--screenshot OUT.png [--after SECONDS]] [--size WxH]";
 
 struct Args {
     options: Options,
@@ -39,6 +39,7 @@ fn parse_args() -> Result<Args, String> {
                 options.focus = Some(f);
             }
             "--select" => options.select.push(value("--select")?.parse().map_err(|_| "--select needs a number")?),
+            "--duplicates" => options.duplicates = true,
             "--view" => options.view = Some(value("--view")?.parse().map_err(|_| "--view needs a number")?),
             "--screenshot" => options.screenshot = Some(PathBuf::from(value("--screenshot")?)),
             "--after" => {

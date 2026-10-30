@@ -9,7 +9,7 @@ with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to 
 | M0 | Repo, Podman gate (copy PlayCraft's scripts), workspace, Rust-only dependency check, central `tags.json` and `collection.json` formats with atomic save, backup and lock, in-memory tag index, XMP sidecar read/update that keeps other apps' fields, scanner (hash, metadata, path tracking), `boorucraft-cli scan / info / tag / search` with plain tags | done |
 | M1 | Desktop app: add and open collection folders, thumbnail cache and worker pool, virtualised grid, viewer (zoom, pan, next/prev, animation), open unsupported formats in the default app, tag editor with the central tag list and "Create tag", bulk tagging, ratings | done |
 | M2 | Full search syntax (negation, OR, wildcards, every metatag, `order:`), error underline, autocomplete, tag sidebar with counts, namespaces and colours | done |
-| M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates); grouping: parent/child links and pools, stacked in the grid | in progress (M3.1 done) |
+| M3 | Duplicates: dHash/pHash, BK-tree, `dupes:` metatag, review screen (keep, merge tags, trash, not-duplicates); grouping: parent/child links and pools, stacked in the grid | in progress (M3.1–M3.2 done) |
 | M4 | File watching, reload on outside changes, missing-file handling, Tags screen (rename/merge/delete across all collections, catch-up for closed ones), Unknown tags review, reading back sidecars edited by other apps, rebuild from sidecars, saved searches, slideshow | |
 | Later | Tag aliases and implications; import tags from boorus by MD5; local ML auto-tagger; pools/collections; video thumbnails via PlayCraft's Rust decoders | |
 
@@ -63,3 +63,8 @@ with the full booru syntax (tags, metatags, `order:`), and edits tags (saved to 
   "not duplicates" respected); a background job in the app hashes new pictures after scans;
   `dupes:yes/no` in searches; `boorucraft-cli dupes DIR… [--threshold N]`. Default threshold
   lowered from 8 to 6 after a false match between two flat wallpapers on the sample copy.
+- 2026-10-30 — M3.2: Duplicates screen (top bar button, `--duplicates`): groups side by side,
+  choose the copy to keep, "Keep this one, trash the others" with a confirmation dialog (tags,
+  rating and source copied first; files and their sidecars go to the system trash via the
+  `trash` crate), "Copy tags to this one", "Not duplicates", "Show in grid", threshold slider.
+  Trashing goes through a replaceable function, so tests never touch the real trash.
