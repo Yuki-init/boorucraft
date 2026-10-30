@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=BooruCraft
+GenericName=Picture Organiser
+Comment=Tag your picture folders and search them like a booru
+Exec=boorucraft
+TryExec=boorucraft
+Icon=io.github.yuki_init.boorucraft
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.yuki_init.boorucraft
+Categories=Graphics;Viewer;Photography;
+Keywords=booru;tag;tags;picture;photo;image;gallery;organiser;organizer;viewer;duplicates;

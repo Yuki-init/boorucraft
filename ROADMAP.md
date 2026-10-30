@@ -146,3 +146,8 @@ aliases and implications, watches folders for outside changes, and shows video t
   `.ico` and `.icns` by `packaging/icons.sh`), window icon, app id
   `io.github.yuki_init.boorucraft`, `--version` on both binaries, Windows GUI subsystem and exe
   icon, and `cargo xtask version|ico|icns` for release packaging.
+- 2026-10-30 — R3.2: release packaging. `.github/workflows/release.yml` calls the Craft suite's
+  shared release workflow (as FilmCraft does): Linux tarball/deb/rpm/AppImage (`packaging/linux`),
+  Flatpak bundle, Arch package, Windows MSI and portable zip (`packaging/windows`), macOS DMG
+  (`packaging/macos`) and FreeBSD (the shared fallback), drafted as a GitHub Release. Unsigned
+  until signing secrets are set.

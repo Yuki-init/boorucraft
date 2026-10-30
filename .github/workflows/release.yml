@@ -1,0 +1,54 @@
+name: Release
+
+# Builds every platform's packages through the Craft suite's shared release workflow, the way
+# FilmCraft does, and drafts a GitHub Release (v<version> from Cargo.toml) with them attached.
+#
+# - Run it by hand (Actions ▸ Release ▸ Run workflow) to test: builds are unsigned, and a
+#   version like 0.1.0-rc.1 can be given to draft a pre-release.
+# - Pushing to the `release` branch makes a real release. The shared workflow then requires the
+#   signing secrets below (set in the repo's `release` environment) and fails without them.
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override for a test run, e.g. 0.1.0-rc.1 (empty: Cargo.toml)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Tracked at @main like the Craft apps, so suite-wide fixes arrive without a PR here.
+    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+    with:
+      app-name: boorucraft
+      app-title: BooruCraft
+      # BooruCraft embeds its own fonts (assets/fonts), not craft-fonts.
+      craft-fonts-ref: ""
+      version: ${{ inputs.version }}
+      # No web build: the app reads folders on disk. No headless server.
+      has-web: false
+      has-server: false
+    secrets:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+      AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}

@@ -6,3 +6,6 @@
 .claude/worktrees/
 .claude/memory/
 scripts/local.env
+
+# Release packages (packaging/*/package.*)
+/dist/

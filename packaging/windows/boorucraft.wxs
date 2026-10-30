@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- BooruCraft's MSI (WiX v5), built by package.ps1. Adapted from FilmCraft's, without its
+     per-user/per-machine scope switching: this one installs for all users. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="BooruCraft" Manufacturer="BooruCraft contributors" Version="$(var.Version)" UpgradeCode="7937319A-7234-46D8-B938-7E32A71B1EA4" Scope="perMachine" Compressed="yes" Language="1033">
+    <SummaryInformation Description="BooruCraft picture organiser" Manufacturer="BooruCraft contributors" />
+    <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
+         (MSI versions are numeric, so 1.2.3-rc.1 and 1.2.3-rc.2 are both 1.2.3). -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of BooruCraft is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="BooruCraftIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="BooruCraftIcon.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Yuki-init/boorucraft" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Yuki-init/boorucraft/issues" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="BooruCraft" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="BooruCraft" Level="1">
+      <ComponentGroupRef Id="BooruCraftFiles" />
+      <ComponentGroupRef Id="BooruCraftDocs" />
+    </Feature>
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UI>
+      <!-- Skip the licence page: the licences are installed beside the program. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2" Condition="NOT Installed" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="NOT Installed" />
+    </UI>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="BooruCraftDocs" Directory="INSTALLFOLDER">
+      <Files Include="$(var.DocsDir)\**" />
+    </ComponentGroup>
+    <ComponentGroup Id="BooruCraftFiles" Directory="INSTALLFOLDER">
+      <Component Id="BooruCraftApp" Guid="AC59502B-3468-41C3-90EB-A6DD8444345F">
+        <File Id="BooruCraftExe" Source="$(var.BinDir)\boorucraft.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="BooruCraft" Description="BooruCraft picture organiser" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="BooruCraftIcon.ico" IconIndex="0" />
+        </File>
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\boorucraft.exe" Value="[#BooruCraftExe]" Type="string" />
+      </Component>
+      <Component Id="BooruCraftCli" Guid="5D8BEA50-6769-41BB-AD25-1DF66FECFA46">
+        <File Id="BooruCraftCliExe" Source="$(var.BinDir)\boorucraft-cli.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

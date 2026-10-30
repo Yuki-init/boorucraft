@@ -23,6 +23,14 @@ then find them with searches like `artist:foo cat -dog rating:s width:>1920 orde
 Status: pre-alpha; the desktop app and the command-line tool work. See
 [ROADMAP.md](ROADMAP.md) and [docs/design.md](docs/design.md).
 
+## Download
+
+Builds for Linux (AppImage, .deb, .rpm, Flatpak, Arch, tarball), Windows (MSI, portable zip),
+macOS (DMG) and FreeBSD are attached to each [release](https://github.com/Yuki-init/boorucraft/releases).
+They are made by `.github/workflows/release.yml` through the Craft suite's shared release
+workflow; the scripts are in `packaging/`. Test builds are unsigned, so Windows SmartScreen and
+macOS Gatekeeper will warn about them.
+
 ## Try it
 
 With a Rust toolchain (the version in `rust-toolchain.toml` is picked up by rustup):

@@ -1,0 +1,45 @@
+# Flatpak manifest for the single-file bundle attached to every GitHub release
+# (boorucraft-<version>-linux-<arch>.flatpak). Build it with packaging/linux/flatpak-bundle.sh.
+# Adapted from FilmCraft's.
+#
+# It repackages the release's own Linux tarball (boorucraft-<version>-linux-<arch>.tar.gz, built
+# on Ubuntu 22.04 by package.sh) instead of compiling Rust inside flatpak-builder: no network and
+# no vendored crate sources during the build, and the same binaries as the AppImage/deb/rpm. The
+# script unpacks the tarball into `stage/` next to a copy of this file. The binaries need
+# glibc >= 2.35 and load X11, Wayland, xkbcommon and Vulkan at run time; the freedesktop runtime
+# has all of them, and the GPU driver comes from its org.freedesktop.Platform.GL extension.
+id: io.github.yuki_init.boorucraft
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: boorucraft
+finish-args:
+  # X11 shared memory (MIT-SHM). Without it the X11 fallback is slow or fails.
+  - --share=ipc
+  # Display: Wayland first; X11 only when no Wayland compositor is running.
+  - --socket=wayland
+  - --socket=fallback-x11
+  # GPU access for drawing the window (Vulkan, or GL as a fallback).
+  - --device=dri
+  # BooruCraft indexes picture folders in place: it reads the pictures and writes
+  # collection.json and XMP sidecars beside them, and watches the folders for changes. The
+  # document portal only hands over what the user picked, not the files inside a folder as they
+  # change, so it needs the home directory and the usual mount points of external drives.
+  # Folder pickers still go through the file-chooser portal.
+  - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/run/media
+  - --filesystem=/mnt
+modules:
+  - name: boorucraft
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 bin/boorucraft /app/bin/boorucraft
+      - install -Dm755 bin/boorucraft-cli /app/bin/boorucraft-cli
+      - install -Dm644 share/applications/io.github.yuki_init.boorucraft.desktop /app/share/applications/io.github.yuki_init.boorucraft.desktop
+      # Already has the release's version and date substituted by package.sh.
+      - install -Dm644 share/metainfo/io.github.yuki_init.boorucraft.metainfo.xml /app/share/metainfo/io.github.yuki_init.boorucraft.metainfo.xml
+      - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/boorucraft /app/share/doc/
+    sources:
+      - type: dir
+        path: stage

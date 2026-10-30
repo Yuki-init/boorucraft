@@ -1,0 +1,73 @@
+# .deb and .rpm packages (nfpm: https://nfpm.goreleaser.com), adapted from FilmCraft's. Run by
+# package.sh, which stages the file tree, substitutes its path for ${STAGE} (nfpm doesn't expand
+# env vars in `src`) and exports VERSION and NFPM_ARCH.
+name: boorucraft
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+# semver: 0.2.0-rc.1 becomes 0.2.0~rc.1 in deb/rpm, so pre-releases sort before the release.
+version_schema: semver
+release: 1
+section: graphics
+priority: optional
+maintainer: ${BOORUCRAFT_MAINTAINER}
+homepage: https://github.com/Yuki-init/boorucraft
+license: MIT OR Apache-2.0
+description: |-
+  Booru-style picture organiser and viewer.
+  Tag your own picture folders and find them with booru searches: tags,
+  exclusions, ratings, sizes and dates, aliases and implications,
+  near-duplicate detection, versions and pools. Tags are kept in XMP
+  sidecars beside the pictures, which are never moved or changed.
+  Includes boorucraft-cli for scanning, tagging and searching from a terminal.
+
+# The binaries link only glibc and libgcc_s directly. Windowing (X11/Wayland, xkbcommon) and the
+# GPU (Vulkan, EGL/GL) are loaded at run time, so they are dependencies/recommendations here
+# rather than ELF NEEDED entries. ${GLIBC_FLOOR} is set by the release workflow's riscv64 job,
+# which builds on a newer Ubuntu.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= ${GLIBC_FLOOR})
+      - libgcc-s1
+      - libxkbcommon0
+      - libvulkan1 | libegl1
+    recommends:
+      - libwayland-client0
+      - libx11-6
+      - libx11-xcb1
+      - libxcursor1
+      - libxi6
+      - libxrandr2
+      - mesa-vulkan-drivers
+      - xdg-desktop-portal
+      - xdg-utils
+  rpm:
+    depends:
+      - glibc >= ${GLIBC_FLOOR}
+      - libxkbcommon
+      - (vulkan-loader or libglvnd-egl)
+    recommends:
+      - libwayland-client
+      - libX11
+      - libXcursor
+      - libXi
+      - libXrandr
+      - mesa-vulkan-drivers
+      - xdg-desktop-portal
+      - xdg-utils
+
+contents:
+  - src: ${STAGE}/usr/bin/boorucraft
+    dst: /usr/bin/boorucraft
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/bin/boorucraft-cli
+    dst: /usr/bin/boorucraft-cli
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/share/
+    dst: /usr/share/
+    type: tree
+
+scripts:
+  postinstall: packaging/linux/postinst.sh
+  postremove: packaging/linux/postinst.sh

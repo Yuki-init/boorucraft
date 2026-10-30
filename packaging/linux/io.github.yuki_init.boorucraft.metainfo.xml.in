@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata (software centres, Flatpak). Template: package.sh substitutes @VERSION@
+     and @DATE@ from Cargo.toml and the build date. -->
+<component type="desktop-application">
+  <id>io.github.yuki_init.boorucraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>BooruCraft</name>
+  <summary>Tag your picture folders and search them like a booru</summary>
+  <developer id="io.github.yuki_init">
+    <name>Yuki-init</name>
+  </developer>
+  <description>
+    <p>
+      BooruCraft is a picture organiser and viewer that works like a booru. Point it at your
+      own folders, tag the pictures, and find them again with booru-style searches.
+    </p>
+    <ul>
+      <li>Booru search syntax: tags, -exclusions, ~or, wildcards, rating, size, date and more</li>
+      <li>One tag list for every collection, with aliases and implications</li>
+      <li>Near-duplicate detection, parent and child versions, and pools</li>
+      <li>Tags are kept beside your pictures in XMP sidecars; pictures are never moved or changed</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.yuki_init.boorucraft.desktop</launchable>
+  <icon type="stock">io.github.yuki_init.boorucraft</icon>
+  <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates). -->
+  <url type="homepage">https://github.com/Yuki-init/boorucraft</url>
+  <url type="bugtracker">https://github.com/Yuki-init/boorucraft/issues</url>
+  <categories>
+    <category>Graphics</category>
+    <category>Viewer</category>
+    <category>Photography</category>
+  </categories>
+  <keywords>
+    <keyword>booru</keyword>
+    <keyword>tags</keyword>
+    <keyword>picture organiser</keyword>
+    <keyword>image viewer</keyword>
+    <keyword>duplicates</keyword>
+  </keywords>
+  <branding>
+    <color type="primary" scheme_preference="light">#ffb3d1</color>
+    <color type="primary" scheme_preference="dark">#5a3fc0</color>
+  </branding>
+  <requires>
+    <display_length compare="ge">640</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <provides>
+    <binary>boorucraft</binary>
+    <binary>boorucraft-cli</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>
