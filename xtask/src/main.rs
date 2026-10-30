@@ -74,7 +74,10 @@ fn ci() -> Result<(), String> {
     cargo(&["test", "--workspace", "--locked"])?;
     layers()?;
     rust_only()?;
-    // Licences, bans and sources (deny.toml); everything is fetched by now, so no network.
+    // Licences, bans and sources (deny.toml). cargo-deny reads every target's crates, but a
+    // build only downloads this platform's, so fetch the rest first (a no-op once fetched,
+    // as in the offline Podman container after scripts/fetch.sh).
+    cargo(&["fetch", "--locked"])?;
     cargo(&["deny", "--offline", "check", "licenses", "bans", "sources"])?;
     eprintln!("==> ci passed");
     Ok(())
